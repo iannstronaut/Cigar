@@ -13,14 +13,14 @@ use crate::context::Context;
 use crate::embedding::build_embedder;
 use crate::output::Printer;
 
-/// Runs `cigar sync`.
-pub fn run(context: &Context, args: &SyncArgs, printer: &Printer) -> Result<i32> {
-    context.require_initialized()?;
+/// Shared implementation used by the CLI and the MCP `cigar_sync` tool.
+///
+/// Holds the store lock, resolves branches, runs the engine, and mirrors refs.
+pub fn run_captured(context: &Context, args: &SyncArgs) -> Result<serde_json::Value> {
     let _lock = cigar_storage::StoreLock::acquire_with_wait(
         &context.lock_path(),
         std::time::Duration::from_secs(context.wait_secs),
     )?;
-
     let store = cigar_storage::open_store_for_write(
         &context.store_path(),
         context.config.embedding.dimensions,
@@ -34,7 +34,6 @@ pub fn run(context: &Context, args: &SyncArgs, printer: &Printer) -> Result<i32>
     } else {
         vec![context.resolve_branch()?]
     };
-
     let mode = if args.dirty {
         SyncMode::Dirty
     } else {
@@ -47,7 +46,7 @@ pub fn run(context: &Context, args: &SyncArgs, printer: &Printer) -> Result<i32>
         strict: context.strict,
     };
 
-    let mut results = Vec::new();
+    let mut payload = Vec::new();
     for branch in &branches {
         let source = open_source(context)?;
         let engine = SyncEngine::new(
@@ -58,95 +57,96 @@ pub fn run(context: &Context, args: &SyncArgs, printer: &Printer) -> Result<i32>
             &clock,
         );
         let outcome = engine.run(source.as_ref(), &context.namespace, branch, &options)?;
-
         if mode == SyncMode::Commit {
             update_refs(context, branch, outcome.head.as_ref())?;
         }
-        let _ = mirror_refs(context, branch, outcome.head.as_ref());
-
-        if !printer.json() && !printer.quiet() && branches.len() > 1 {
-            printer.line(&format!(
-                "{}: {} file (+{} ~{} -{}), {} simbol, {} vektor baru",
-                branch,
-                outcome.summary.files_added
-                    + outcome.summary.files_modified
-                    + outcome.summary.files_deleted,
-                outcome.summary.files_added,
-                outcome.summary.files_modified,
-                outcome.summary.files_deleted,
-                outcome.summary.symbols_added,
-                outcome.summary.embeddings_computed
-            ));
-        }
-        for warning in &outcome.warnings {
-            printer.warn(warning);
-        }
-        results.push(outcome);
+        mirror_refs(context, branch, outcome.head.as_ref())?;
+        payload.push(serde_json::json!({
+            "branch": outcome.branch.to_string(),
+            "head": outcome.head.as_ref().map(|head| head.as_str().to_owned()),
+            "status": outcome.status.to_string(),
+            "files_added": outcome.summary.files_added,
+            "files_modified": outcome.summary.files_modified,
+            "files_deleted": outcome.summary.files_deleted,
+            "files_skipped": outcome.summary.files_skipped,
+            "symbols_added": outcome.summary.symbols_added,
+            "embeddings_computed": outcome.summary.embeddings_computed,
+            "embeddings_reused": outcome.summary.embeddings_reused,
+            "edges_inserted": outcome.summary.edges_inserted,
+            "edges_resolved": outcome.summary.edges_resolved,
+            "edges_unresolved": outcome.summary.edges_unresolved,
+            "warnings": outcome.warnings,
+        }));
     }
 
+    Ok(serde_json::json!({
+        "schema_version": cigar_core::SCHEMA_VERSION,
+        "namespace": context.namespace.to_string(),
+        "mode": mode.to_string(),
+        "branches": payload,
+    }))
+}
+
+/// Runs `cigar sync`.
+pub fn run(context: &Context, args: &SyncArgs, printer: &Printer) -> Result<i32> {
+    context.require_initialized()?;
+    let value = run_captured(context, args)?;
+
     if printer.json() {
-        let payload = serde_json::json!({
-            "schema_version": cigar_core::SCHEMA_VERSION,
-            "namespace": context.namespace.to_string(),
-            "mode": mode.to_string(),
-            "branches": results.iter().map(|outcome| serde_json::json!({
-                "branch": outcome.branch.to_string(),
-                "head": outcome.head.as_ref().map(|head| head.as_str().to_owned()),
-                "status": outcome.status.to_string(),
-                "files_added": outcome.summary.files_added,
-                "files_modified": outcome.summary.files_modified,
-                "files_deleted": outcome.summary.files_deleted,
-                "files_skipped": outcome.summary.files_skipped,
-                "symbols_added": outcome.summary.symbols_added,
-                "embeddings_computed": outcome.summary.embeddings_computed,
-                "embeddings_reused": outcome.summary.embeddings_reused,
-                "edges_inserted": outcome.summary.edges_inserted,
-                "edges_resolved": outcome.summary.edges_resolved,
-                "edges_unresolved": outcome.summary.edges_unresolved,
-                "warnings": outcome.warnings,
-            })).collect::<Vec<_>>(),
-        });
-        printer.json_document(&payload);
+        printer.json_document(&value);
+        return Ok(0);
+    }
+    if printer.quiet() {
         return Ok(0);
     }
 
-    if !printer.quiet() {
-        let outcome = results.first();
-        if let Some(outcome) = outcome {
-            if branches.len() == 1 {
-                if outcome.summary.files_added
-                    + outcome.summary.files_modified
-                    + outcome.summary.files_deleted
-                    == 0
-                {
-                    printer.line("Tidak ada perubahan.");
-                } else {
-                    printer.line(&format!(
-                        "Sync {} · {} file (+{} ~{} -{}) · {} simbol · {} vektor baru · {} dipakai ulang",
-                        outcome.branch,
-                        outcome.summary.files_added
-                            + outcome.summary.files_modified
-                            + outcome.summary.files_deleted,
-                        outcome.summary.files_added,
-                        outcome.summary.files_modified,
-                        outcome.summary.files_deleted,
-                        outcome.summary.symbols_added,
-                        outcome.summary.embeddings_computed,
-                        outcome.summary.embeddings_reused
-                    ));
-                }
-                if outcome.summary.files_skipped > 0 {
-                    printer.info(&format!(
-                        "{} file dilewati (biner/terlalu besar/symlink)",
-                        outcome.summary.files_skipped
-                    ));
-                }
-                printer.info(&format!(
-                    "edge: {} ditulis · {} ter-resolve · {} belum",
-                    outcome.summary.edges_inserted,
-                    outcome.summary.edges_resolved,
-                    outcome.summary.edges_unresolved
+    let branches = value["branches"].as_array().cloned().unwrap_or_default();
+    for branch in &branches {
+        let name = branch["branch"].as_str().unwrap_or("?");
+        let added = branch["files_added"].as_u64().unwrap_or(0);
+        let modified = branch["files_modified"].as_u64().unwrap_or(0);
+        let deleted = branch["files_deleted"].as_u64().unwrap_or(0);
+        let total = added + modified + deleted;
+        if branches.len() == 1 {
+            if total == 0 {
+                printer.line("Tidak ada perubahan.");
+            } else {
+                printer.line(&format!(
+                    "Sync {} - {} file (+{} ~{} -{}) - {} simbol - {} vektor baru - {} dipakai ulang",
+                    name,
+                    total,
+                    added,
+                    modified,
+                    deleted,
+                    branch["symbols_added"].as_u64().unwrap_or(0),
+                    branch["embeddings_computed"].as_u64().unwrap_or(0),
+                    branch["embeddings_reused"].as_u64().unwrap_or(0)
                 ));
+            }
+            let skipped = branch["files_skipped"].as_u64().unwrap_or(0);
+            if skipped > 0 {
+                printer.info(&format!(
+                    "{skipped} file dilewati (biner/terlalu besar/symlink)"
+                ));
+            }
+            printer.info(&format!(
+                "edge: {} ditulis - {} ter-resolve - {} belum",
+                branch["edges_inserted"].as_u64().unwrap_or(0),
+                branch["edges_resolved"].as_u64().unwrap_or(0),
+                branch["edges_unresolved"].as_u64().unwrap_or(0)
+            ));
+        } else {
+            printer.line(&format!(
+                "{}: {} file, {} simbol, {} vektor baru",
+                name,
+                total,
+                branch["symbols_added"].as_u64().unwrap_or(0),
+                branch["embeddings_computed"].as_u64().unwrap_or(0)
+            ));
+        }
+        for warning in branch["warnings"].as_array().cloned().unwrap_or_default() {
+            if let Some(text) = warning.as_str() {
+                printer.warn(text);
             }
         }
     }
@@ -183,7 +183,6 @@ fn list_git_branches(context: &Context) -> Result<Vec<BranchName>> {
         .output()
         .map_err(|err| EngineError::io(&root, err))?;
     if !output.status.success() {
-        // Fall back to the current branch rather than failing the sync.
         return Ok(vec![context.resolve_branch()?]);
     }
     let mut branches = Vec::new();
@@ -203,7 +202,7 @@ fn list_git_branches(context: &Context) -> Result<Vec<BranchName>> {
 }
 
 /// Updates `.cig/refs/heads/<branch>` after a commit-mode sync.
-fn update_refs(context: &Context, branch: &BranchName, head: Option<&CommitId>) -> Result<()> {
+pub fn update_refs(context: &Context, branch: &BranchName, head: Option<&CommitId>) -> Result<()> {
     let path = refs_path(&context.cig_dir, branch);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| EngineError::io(parent, err))?;

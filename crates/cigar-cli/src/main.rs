@@ -8,6 +8,7 @@ mod cli;
 mod commands;
 mod context;
 mod embedding;
+mod mcp;
 mod output;
 
 use std::process::ExitCode;

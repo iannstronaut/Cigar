@@ -20,6 +20,15 @@ pub fn run(cli: Cli) -> Result<i32> {
         Command::Reindex(args) => commands::reindex::run(&context, args, &printer),
         Command::Query(args) => commands::query::run(&context, args, &printer),
         Command::Inspect(args) => commands::inspect::run(&context, args, &printer),
+        Command::Branch(args) => commands::branch::run_branch(&context, args, &printer),
+        Command::Gc(args) => commands::branch::run_gc(&context, args, &printer),
+        Command::Hook(args) => commands::hook::run(&context, args, &printer),
+        Command::Mcp(args) => {
+            let options = crate::mcp::McpOptions {
+                allow_write: args.allow_write,
+            };
+            crate::mcp::run(&context, &options)
+        }
         Command::Version(args) => commands::version::run(&context, args, &printer),
         other => Err(EngineError::invalid(format!(
             "perintah {} belum diimplementasikan pada fase ini",

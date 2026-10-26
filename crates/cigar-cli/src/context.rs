@@ -88,6 +88,24 @@ impl Context {
         })
     }
 
+    /// Clones this context with a different repository root, keeping every
+    /// resolved setting.
+    #[must_use]
+    pub fn clone_for(&self, root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            cig_dir: self.cig_dir.clone(),
+            config_path: self.config_path.clone(),
+            config: self.config.clone(),
+            namespace: self.namespace.clone(),
+            branch_override: self.branch_override.clone(),
+            verbose: self.verbose,
+            offline: self.offline,
+            strict: self.strict,
+            wait_secs: self.wait_secs,
+        }
+    }
+
     /// Fails with `NotInitialized` when the state directory is missing.
     pub fn require_initialized(&self) -> Result<()> {
         if !self.cig_dir.join("store.db").exists() {

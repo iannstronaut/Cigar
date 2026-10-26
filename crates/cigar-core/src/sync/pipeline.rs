@@ -200,11 +200,30 @@ impl<'a> SyncEngine<'a> {
 
         // --- delta -------------------------------------------------------
         self.progress.phase_started(SyncPhase::Delta, None);
-        let dirty_scan = self.scan_for_mode(source, options)?;
+        // Commit mode on a non-Git source has no tree to diff, so the working
+        // tree is the only source of truth and must be scanned.
+        let dirty_scan = if options.mode == SyncMode::Commit && source.mode() == SourceMode::FsOnly
+        {
+            self.scan_for_mode(
+                source,
+                &SyncOptions {
+                    mode: SyncMode::Fs,
+                    ..options.clone()
+                },
+            )?
+        } else {
+            self.scan_for_mode(source, options)?
+        };
         let head = source.head()?;
+        let effective_mode =
+            if options.mode == SyncMode::Commit && source.mode() == SourceMode::FsOnly {
+                SyncMode::Fs
+            } else {
+                options.mode
+            };
         let mut plan = compute_delta(
             source,
-            options.mode,
+            effective_mode,
             base.as_ref(),
             head.as_ref(),
             &manifest,

@@ -1,0 +1,30 @@
+[package]
+name = "cigar-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cigar"
+path = "src/main.rs"
+
+[dependencies]
+cigar-core = { path = "../cigar-core" }
+cigar-embed = { path = "../cigar-embed" }
+cigar-storage = { path = "../cigar-storage" }
+clap.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

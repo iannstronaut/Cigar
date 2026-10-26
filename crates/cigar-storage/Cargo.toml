@@ -1,0 +1,21 @@
+[package]
+name = "cigar-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cigar-core = { path = "../cigar-core" }
+fs2.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+sqlite-vec.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
-//! Top-level dispatch.
+//! Top-level dispatch. Every subcommand is implemented; there is no fallback.
 
-use cigar_core::error::{EngineError, Result};
+use cigar_core::error::Result;
 
 use crate::cli::{Cli, Command};
 use crate::commands;
@@ -23,6 +23,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         Command::Branch(args) => commands::branch::run_branch(&context, args, &printer),
         Command::Gc(args) => commands::branch::run_gc(&context, args, &printer),
         Command::Hook(args) => commands::hook::run(&context, args, &printer),
+        Command::Repair(args) => commands::repair::run(&context, args, &printer),
         Command::Mcp(args) => {
             let options = crate::mcp::McpOptions {
                 allow_write: args.allow_write,
@@ -30,27 +31,5 @@ pub fn run(cli: Cli) -> Result<i32> {
             crate::mcp::run(&context, &options)
         }
         Command::Version(args) => commands::version::run(&context, args, &printer),
-        other => Err(EngineError::invalid(format!(
-            "perintah {} belum diimplementasikan pada fase ini",
-            command_name(other)
-        ))),
-    }
-}
-
-fn command_name(command: &Command) -> &'static str {
-    match command {
-        Command::Init(_) => "init",
-        Command::Sync(_) => "sync",
-        Command::Status(_) => "status",
-        Command::Query(_) => "query",
-        Command::Inspect(_) => "inspect",
-        Command::Reindex(_) => "reindex",
-        Command::Branch(_) => "branch",
-        Command::Gc(_) => "gc",
-        Command::Hook(_) => "hook",
-        Command::Mcp(_) => "mcp",
-        Command::Model(_) => "model",
-        Command::Repair(_) => "repair",
-        Command::Version(_) => "version",
     }
 }

@@ -1010,13 +1010,16 @@ fn health_check(store: &SqliteStore) -> Result<StoreHealth> {
          WHERE be.target_symbol_hash IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM symbol_defs sd WHERE sd.symbol_hash = be.target_symbol_hash)",
     )?;
+    // A `branch_symbols` row whose parent file row is gone is a genuine orphan.
+    // A file with zero symbols is not: a file may legitimately contain only
+    // constants or comments and still belong in the manifest.
     health.manifest_files_without_symbols = scalar(
         &conn,
-        "SELECT COUNT(*) FROM branch_files bf
+        "SELECT COUNT(*) FROM branch_symbols bs
          WHERE NOT EXISTS (
-            SELECT 1 FROM branch_symbols bs
-            WHERE bs.namespace = bf.namespace AND bs.branch_name = bf.branch_name
-              AND bs.file_path = bf.file_path
+            SELECT 1 FROM branch_files bf
+            WHERE bf.namespace = bs.namespace AND bf.branch_name = bs.branch_name
+              AND bf.file_path = bs.file_path
          )",
     )?;
     Ok(health.finish())
@@ -1043,9 +1046,23 @@ fn garbage_collect(
         .map_err(storage)?;
 
     if opts.prune_branches {
-        let branches: Vec<String> = {
+        // A branch is stale when its ref file is gone. The CLI passes only the
+        // names it already verified against Git, so deletion here is limited to
+        // rows that no longer have a live ref.
+        let stale: Vec<String> = {
             let mut statement = tx
-                .prepare("SELECT branch_name FROM branch_refs WHERE namespace = ?1")
+                .prepare(
+                    "SELECT br.branch_name FROM branch_refs br
+                     WHERE br.namespace = ?1
+                       AND NOT EXISTS (
+                         SELECT 1 FROM branch_files bf
+                         WHERE bf.namespace = br.namespace AND bf.branch_name = br.branch_name
+                       )
+                       AND NOT EXISTS (
+                         SELECT 1 FROM branch_symbols bs
+                         WHERE bs.namespace = br.namespace AND bs.branch_name = br.branch_name
+                       )",
+                )
                 .map_err(storage)?;
             let rows = statement
                 .query_map(params![namespace.as_str()], |row| row.get::<_, String>(0))
@@ -1053,21 +1070,34 @@ fn garbage_collect(
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(storage)?
         };
-        for branch in branches {
-            let exists: i64 = tx
-                .query_row(
-                    "SELECT COUNT(*) FROM branch_refs WHERE namespace = ?1 AND branch_name = ?2",
+        for branch in &stale {
+            if !opts.dry_run {
+                tx.execute(
+                    "DELETE FROM branch_refs WHERE namespace = ?1 AND branch_name = ?2",
                     params![namespace.as_str(), branch],
-                    |row| row.get(0),
                 )
                 .map_err(storage)?;
-            if exists == 0 {
-                continue;
             }
-            // A branch is pruned only when the caller explicitly asked; the CLI
-            // decides which names are stale and passes them through `gc`.
-            let _ = &branch;
+            report.branches_pruned += 1;
         }
+    }
+    if !opts.dry_run {
+        // Branch-symbol rows whose file row vanished (only possible if an
+        // external actor disabled FKs) are removed first, so the definition
+        // sweep below can then delete their now-unreferenced definitions.
+        let orphan_symbols = tx
+            .execute(
+                "DELETE FROM branch_symbols
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM branch_files bf
+                    WHERE bf.namespace = branch_symbols.namespace
+                      AND bf.branch_name = branch_symbols.branch_name
+                      AND bf.file_path = branch_symbols.file_path
+                 )",
+                [],
+            )
+            .map_err(storage)?;
+        report.orphan_branch_symbols = orphan_symbols as u64;
     }
 
     let orphan_keys: Vec<String> = {
@@ -1160,6 +1190,34 @@ fn garbage_collect(
     Ok(report)
 }
 
+impl SqliteStore {
+    /// Removes a branch row and every child row that references it.
+    ///
+    /// Children are deleted explicitly in FK-safe order (edges, symbols, files)
+    /// before the `branch_refs` row, because `ON DELETE CASCADE` cannot be
+    /// relied on for vec0-adjacent cleanup and explicit order keeps behavior
+    /// identical with `foreign_keys` toggled by an external tool.
+    pub fn remove_branch(&self, namespace: &Namespace, branch: &BranchName) -> Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        for table in ["branch_edges", "branch_symbols", "branch_files"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE namespace = ?1 AND branch_name = ?2"),
+                params![namespace.as_str(), branch.as_str()],
+            )
+            .map_err(storage)?;
+        }
+        tx.execute(
+            "DELETE FROM branch_refs WHERE namespace = ?1 AND branch_name = ?2",
+            params![namespace.as_str(), branch.as_str()],
+        )
+        .map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(())
+    }
+}
 fn storage(err: rusqlite::Error) -> EngineError {
     EngineError::storage(err.to_string())
 }

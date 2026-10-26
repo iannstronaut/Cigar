@@ -192,6 +192,7 @@ pub struct GcReport {
     pub symbol_edges_deleted: u64,
     pub file_blobs_deleted: u64,
     pub blob_symbols_deleted: u64,
+    pub orphan_branch_symbols: u64,
     pub bytes_before: u64,
     pub bytes_after: u64,
 }

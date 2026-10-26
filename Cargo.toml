@@ -35,8 +35,9 @@ toml_edit = "0.25"
 walkdir = "2.5"
 
 [profile.release]
+# Thin LTO keeps cross-crate inlining without fat-LTO peak memory; codegen-units
+# stays at Cargo's default so release builds fit in CI memory.
 lto = "thin"
-codegen-units = 1
 strip = "symbols"
 panic = "abort"
 

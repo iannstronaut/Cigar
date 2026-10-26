@@ -404,16 +404,26 @@ impl<'a> SyncEngine<'a> {
             warnings: warnings.clone(),
             ..SyncSummary::default()
         };
+        // Count files actually written, not delta tasks: a task whose content
+        // was skipped (binary, too large, non-UTF-8, symlink) must not be
+        // reported as added or modified (docs/04 section 8).
+        let written: BTreeMap<&RepoPath, &PlannedFile> =
+            files.iter().map(|file| (&file.path, file)).collect();
         for task in &plan.tasks {
+            let was_written = written.contains_key(&task.path);
             match task.status {
-                ChangeStatus::Added => summary.files_added += 1,
-                ChangeStatus::Modified => summary.files_modified += 1,
+                ChangeStatus::Added if was_written => summary.files_added += 1,
+                ChangeStatus::Modified | ChangeStatus::TypeChanged if was_written => {
+                    summary.files_modified += 1;
+                }
+                // A skipped file still leaves the branch manifest unchanged, so
+                // reporting it as deleted would be wrong too.
                 ChangeStatus::Deleted => summary.files_deleted += 1,
-                ChangeStatus::Renamed => {
+                ChangeStatus::Renamed if was_written => {
                     summary.files_added += 1;
                     summary.files_deleted += 1;
                 }
-                ChangeStatus::TypeChanged => summary.files_modified += 1,
+                _ => {}
             }
         }
         summary.symbols_added = files.iter().map(|file| file.symbols.len() as u64).sum();

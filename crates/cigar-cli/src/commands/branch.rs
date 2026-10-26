@@ -115,7 +115,7 @@ fn prune(
             state: None,
         };
         store.apply_branch_batch(&context.namespace, branch, batch)?;
-        let _ = remove_branch_row(store, context, branch);
+        remove_branch_row(store, context, branch)?;
         printer.line(&format!("dihapus: {branch}"));
     }
     Ok(0)
@@ -137,11 +137,11 @@ fn clear_branch(
 }
 
 fn remove_branch_row(
-    _store: &cigar_storage::SqliteStore,
-    _context: &Context,
-    _branch: &BranchName,
+    store: &cigar_storage::SqliteStore,
+    context: &Context,
+    branch: &BranchName,
 ) -> Result<()> {
-    Ok(())
+    store.remove_branch(&context.namespace, branch)
 }
 
 /// Branch names that still exist in Git.
@@ -190,6 +190,7 @@ pub fn run_gc(context: &Context, args: &GcArgs, printer: &Printer) -> Result<i32
         printer.json_document(&serde_json::json!({
             "schema_version": cigar_core::SCHEMA_VERSION,
             "dry_run": args.dry_run,
+            "branches_pruned": report.branches_pruned,
             "vectors_deleted": report.vectors_deleted,
             "symbol_defs_deleted": report.symbol_defs_deleted,
             "symbol_edges_deleted": report.symbol_edges_deleted,

@@ -190,7 +190,13 @@ impl<'a> SyncEngine<'a> {
         } else {
             self.store.get_branch_manifest(namespace, branch)?
         };
-        let base = existing_state.and_then(|state| state.commit_hash.clone());
+        // --full/reindex must ignore the stored base commit; otherwise the
+        // tree diff is empty and nothing is reindexed.
+        let base = if options.full {
+            None
+        } else {
+            existing_state.and_then(|state| state.commit_hash.clone())
+        };
 
         // --- delta -------------------------------------------------------
         self.progress.phase_started(SyncPhase::Delta, None);

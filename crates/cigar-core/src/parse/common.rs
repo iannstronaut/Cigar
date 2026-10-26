@@ -31,6 +31,8 @@ impl ParserRegistry {
         registry.register(Box::new(super::RustParser::new()));
         registry.register(Box::new(super::TypeScriptParser::new()));
         registry.register(Box::new(super::JavaScriptParser::new()));
+        registry.register(Box::new(super::GoParser::new()));
+        registry.register(Box::new(super::PythonParser::new()));
         registry
     }
 

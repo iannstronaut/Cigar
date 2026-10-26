@@ -16,6 +16,8 @@ pub fn run(cli: Cli) -> Result<i32> {
         Command::Init(args) => commands::init::run(&context, args, &printer),
         Command::Status(args) => commands::status::run(&context, args, &printer),
         Command::Sync(args) => commands::sync::run(&context, args, &printer),
+        Command::Model(args) => commands::model::run(&context, args, &printer),
+        Command::Reindex(args) => commands::reindex::run(&context, args, &printer),
         Command::Version(args) => commands::version::run(&context, args, &printer),
         other => Err(EngineError::invalid(format!(
             "perintah {} belum diimplementasikan pada fase ini",

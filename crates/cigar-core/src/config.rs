@@ -100,7 +100,7 @@ impl Default for Config {
             },
             embedding: EmbeddingConfig {
                 provider: EmbeddingProvider::OnnxLocal,
-                model: "granite-embedding-97m".into(),
+                model: "granite-embedding-125m-english".into(),
                 revision: String::new(),
                 dimensions: 768,
                 model_dir: default_model_dir(),

@@ -21,6 +21,11 @@ impl Printer {
         self.json
     }
 
+    #[must_use]
+    pub fn quiet(&self) -> bool {
+        self.quiet
+    }
+
     /// Prints a line of data to stdout unless quiet.
     pub fn line(&self, text: &str) {
         if self.quiet {

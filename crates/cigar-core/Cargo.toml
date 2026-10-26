@@ -9,10 +9,21 @@ repository.workspace = true
 [dependencies]
 blake3.workspace = true
 globset.workspace = true
+gix.workspace = true
+ignore.workspace = true
 rayon.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-python.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

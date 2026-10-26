@@ -127,14 +127,50 @@ impl Context {
     }
 
     /// Branch used when `--branch` is absent.
+    ///
+    /// Git is authoritative: `.cig/HEAD` is a cache, and a branch switch
+    /// performed with `git checkout` must not require re-running `cigar init`.
     pub fn resolve_branch(&self) -> Result<BranchName> {
         if let Some(branch) = &self.branch_override {
             return Ok(branch.clone());
+        }
+        if let Some(branch) = self.git_head_branch()? {
+            return Ok(branch);
         }
         match self.head_ref()? {
             Some(HeadRef::Branch(branch)) => Ok(branch),
             Some(HeadRef::Detached(_)) => Ok(BranchName::detached()),
             None => Ok(BranchName::parse("main")?),
+        }
+    }
+
+    /// Reads the current branch from Git without opening a repository handle
+    /// (works for worktrees, and returns `@detached` for a detached HEAD).
+    pub fn git_head_branch(&self) -> Result<Option<BranchName>> {
+        if !self.root.join(".git").exists() {
+            return Ok(None);
+        }
+        let output = std::process::Command::new("git")
+            .args(["symbolic-ref", "--short", "-q", "HEAD"])
+            .current_dir(&self.root)
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {
+                let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                if name.is_empty() {
+                    return Ok(Some(BranchName::detached()));
+                }
+                Ok(Some(BranchName::parse(name)?))
+            }
+            Ok(_) => {
+                // A detached HEAD makes `symbolic-ref` exit non-zero.
+                if self.root.join(".git").exists() {
+                    Ok(Some(BranchName::detached()))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(_) => Ok(None),
         }
     }
 

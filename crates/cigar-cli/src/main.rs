@@ -7,6 +7,7 @@ mod app;
 mod cli;
 mod commands;
 mod context;
+mod embedding;
 mod output;
 
 use std::process::ExitCode;

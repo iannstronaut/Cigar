@@ -24,6 +24,19 @@ pub fn open_store(path: &Path, dimensions: usize) -> Result<SqliteStore> {
     Ok(store)
 }
 
+/// Opens an existing store for writing and validates schema/model.
+pub fn open_store_for_write(path: &Path, dimensions: usize) -> Result<SqliteStore> {
+    register_sqlite_vec();
+    if !path.exists() {
+        return Err(EngineError::NotInitialized {
+            path: path.display().to_string(),
+        });
+    }
+    let store = SqliteStore::open(path, dimensions, true)?;
+    validate_schema(&store, dimensions)?;
+    Ok(store)
+}
+
 /// Creates the store if needed and validates it.
 pub fn open_or_init_store(path: &Path, dimensions: usize) -> Result<SqliteStore> {
     register_sqlite_vec();

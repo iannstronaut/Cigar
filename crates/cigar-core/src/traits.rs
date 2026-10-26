@@ -179,13 +179,28 @@ pub struct BlobSymbolRow {
 }
 
 /// Git or filesystem source.
-pub trait SourceProvider: Send + Sync {
+///
+/// `gix::Repository` is deliberately not `Send + Sync`, so this port is used
+/// only on the thread that performs delta computation. Parsing, hashing, and
+/// embedding happen after all bytes are read.
+pub trait SourceProvider {
     fn mode(&self) -> crate::domain::SourceMode;
     fn head(&self) -> Result<Option<CommitId>>;
     fn head_branch(&self) -> Result<Option<BranchName>>;
     fn changes(&self, base: Option<&CommitId>, mode: SyncMode) -> Result<ChangeSet>;
     fn read(&self, path: &RepoPath, revision: Revision) -> Result<Vec<u8>>;
     fn fingerprint(&self) -> Result<Option<Digest>>;
+
+    /// Worktree root, when this source has one. `None` for bare repositories.
+    fn workdir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Files available at `revision`, sorted. Used by `--full`.
+    fn list(&self, revision: Revision) -> Result<Vec<RepoPath>> {
+        let _ = revision;
+        Ok(Vec::new())
+    }
 }
 
 /// Changes to apply for one sync.

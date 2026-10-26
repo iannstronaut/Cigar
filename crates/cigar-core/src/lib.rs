@@ -6,7 +6,10 @@
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod git;
 pub mod hash;
+pub mod parse;
+pub mod sync;
 pub mod traits;
 
 pub use error::{EngineError, Result};

@@ -21,8 +21,8 @@ pub use migrate::{backup_store, is_schema_v1, require_reindex_for_v1};
 pub use schema::{SCHEMA_SQL_V2, SUPPORTED_SCHEMA_VERSION};
 pub use sqlite::{register_sqlite_vec, SqliteStore};
 pub use store::{
-    open_or_init_store, open_store, record_model_meta, stored_config_fingerprint,
-    verify_model_compat,
+    open_or_init_store, open_store, open_store_for_write, record_model_meta,
+    stored_config_fingerprint, verify_model_compat,
 };
 
 pub use cigar_core::domain::{

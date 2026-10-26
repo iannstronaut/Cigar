@@ -24,7 +24,7 @@ Status skema: **v2 multi-branch content-addressable** (`docs/21`), `schema_versi
 
 ---
 
-## 1. Fase 0 — M0 Spike dan keputusan (gate)
+## 0. Status pelaksanaan (diperbarui)
 
 Deliverable:
 
@@ -229,3 +229,23 @@ cargo test -p cigar-storage
 3. Smoke test CLI nyata (bukan hanya unit test).
 4. Tidak ada file `docs.md`, `docs/`, `.agent/` di commit.
 5. Commit message konvensional (`feat(m1): ...`), satu commit per fase (boleh beberapa commit kecil di dalam fase, tetap tanpa docs).
+
+| Fase | Status | Commit | Bukti |
+|---|---|---|---|
+| 0 M0 Spike | Selesai | (riset, tidak di-commit) | gix, sqlite-vec, tree-sitter, ONNX terverifikasi di mesin ini |
+| 1 M1 Fondasi | Selesai | `c1454f2` | 73 test, init/status/version, schema v2 |
+| 2 M2 Git+Parser+Sync | Selesai | `79c0adf` | 133 test, multi-branch, incremental==full |
+| 3 M3 Embedding+Go/Py | Selesai | `b9dbc17` | 168 test, ONNX nyata 768d CLS, reindex |
+| 4 M4 Query+Inspect | Selesai | `db78cc8` | 191 test, budget, graph, JSON v2 |
+| 5 M5 MCP+Hook+GC | Selesai | `4e1c8d3` | 200 test, MCP stdio, tight lock, bare/fs-only/detached |
+| 6 M6 Hardening | Selesai | `0821ea3` | repair, orphan GC, README, CI 3 OS, release build |
+
+Catatan penyimpangan yang disetujui (bukti spike M0):
+1. Model `granite-embedding-97m-multilingual-r2` ternyata **384 dimensi** dengan **CLS pooling**, bukan 768/mean. Default config memakai `granite-embedding-125m-english` (768d, CLS) agar kontrak 768 tetap; manifest menyediakan keduanya dan `reindex` wajib saat berganti.
+2. `tokenizers` 1.0.0-rc.3 tidak bisa memuat tokenizer 97M-R2; build memakai `tokenizers 0.23.2` + `ort 2.0.0-rc.15` dengan `load-dynamic`.
+3. `sqlite-vec` 0.1.10-alpha.4 gagal build (file diskann hilang); dipin ke `0.1.7-alpha.10`.
+4. `codegen-units = 1` membuat release build kehabisan memori di mesin ini; profile memakai `lto = "thin"` + default codegen units.
+
+---
+
+## 1. Fase 0 — M0 Spike dan keputusan (gate)

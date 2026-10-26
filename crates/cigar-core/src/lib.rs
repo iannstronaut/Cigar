@@ -9,6 +9,7 @@ pub mod error;
 pub mod git;
 pub mod hash;
 pub mod parse;
+pub mod query;
 pub mod sync;
 pub mod traits;
 

@@ -15,6 +15,7 @@ cigar-core = { path = "../cigar-core" }
 cigar-embed = { path = "../cigar-embed" }
 cigar-storage = { path = "../cigar-storage" }
 clap.workspace = true
+globset.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -256,6 +256,7 @@ impl ContextStore for SqliteStore {
                     end_line: occurrence.end_line,
                     distance: *distance,
                     score: 1.0 - *distance,
+                    pending_code: String::new(),
                 });
             }
         }
@@ -769,6 +770,7 @@ fn occurrences_for_key(
             end_line: end as u32,
             distance: 0.0,
             score: 1.0,
+            pending_code: String::new(),
         });
     }
     Ok(out)

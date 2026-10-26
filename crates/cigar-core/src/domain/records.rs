@@ -105,6 +105,8 @@ pub struct ScoredOccurrence {
     pub end_line: u32,
     pub distance: f32,
     pub score: f32,
+    /// Code snippet cached by the query engine for rendering; never persisted.
+    pub pending_code: String,
 }
 
 /// Result of a vector search before branch filtering, as stored in the pool.

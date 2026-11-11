@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Deterministic fake embedder for tests and `--offline`.
 //!
 //! Produces stable, unit-norm vectors derived from the BLAKE3 digest of the

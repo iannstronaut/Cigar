@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! tree-sitter parser adapters for Rust, TypeScript/TSX, and JavaScript.
 //!
 //! Each parser extracts imports, symbols, and edges exactly as docs/07

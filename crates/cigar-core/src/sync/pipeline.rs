@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sync orchestration (docs/04 sections 3-8).
 //!
 //! `SyncEngine` holds the adapters and runs the staged pipeline. It is the only

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! `cigar hook install|uninstall` (docs/11 sections 6-7).
 //!
 //! Hooks are installed as marker-delimited blocks so an existing hook script is

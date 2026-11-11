@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Top-level dispatch. Every subcommand is implemented; there is no fallback.
 
 use cigar_core::error::Result;

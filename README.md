@@ -15,17 +15,18 @@ currently version `0.1.0` and uses lexical search by default.
 |---|---|---|
 | Default retrieval | SQLite FTS5 weighted BM25, identifier splitting, graph centrality, and one-hop context | FTS5 lexical ranking with graph centrality and one-hop context |
 | Models | No model or heavy AI runtime for default init, sync, or query | Default CLI does not load a model; ONNX dependencies are behind the `semantic` feature |
-| Storage | SQLite files, symbols, graph edges, and FTS5 index | Content-addressed SQLite schema with branch manifests, FTS5 and sqlite-vec |
-| Repository state | Git object and working-tree indexing, including bare and filesystem-only modes | Existing CLI includes branch-aware sync, dirty sync and multiple Git modes; consult command help for supported options and limitations |
+| Storage | SQLite files, symbols, graph edges, and FTS5 index | SQLite schema v4 with files, symbols, graph edges, and FTS5; no sqlite-vec dependency |
+| Repository state | Git object and working-tree indexing, including bare and filesystem-only modes | One snapshot per namespace; sync after switching branches, with dirty and filesystem modes supported |
 | Performance | The specification proposes fast local retrieval | No latency or build-size target is claimed as measured here |
 
 The target is daemonless and library-first: `cigar-core` provides engine
 contracts, storage supplies SQLite, and the CLI is a thin interface. A calling
 agent is expected to translate intent into technical search terms. Optional
 semantic extensions are not intended to be prerequisites for lexical search.
-The current storage schema still differs from the target. Identifier splitting
-and BM25 weights are configurable under `[search]`; changing splitting requires
-reindexing.
+Identifier splitting and BM25 field weights are configurable under `[search]`.
+Changing `split_identifiers` requires reindexing: the next sync rebuilds the
+namespace, and queries reject a mismatched setting until sync or reindex finishes.
+Weights affect queries immediately without rebuilding the index.
 
 ## Build and current quick start
 
@@ -53,18 +54,15 @@ the current CLI query and sync paths remain lexical.
 
 | Command | Purpose |
 |---|---|
-| `cigar init` | Create local configuration, schema, and embedding metadata |
+| `cigar init` | Create local configuration and SQLite schema |
 | `cigar sync` | Incrementally index a branch; `--dirty` indexes the working tree without advancing the indexed commit |
-| `cigar sync --all-branches` | Index local branches |
 | `cigar query <text>` | Retrieve ranked code context |
 | `cigar inspect <symbol>` | Inspect a symbol and its relations |
 | `cigar status [--verify]` | Show index state and optionally verify it |
 | `cigar reindex` | Rebuild the index |
-| `cigar branch list` / `prune` | Inspect or prune indexed branches |
-| `cigar gc` | Remove unreferenced data |
 | `cigar hook install` / `uninstall` | Manage Git hooks |
 | `cigar model download` / `status` | Manage embedding model files |
-| `cigar repair` | Verify or repair store inconsistencies |
+| `cigar repair --verify` | Verify store consistency |
 | `cigar mcp [--allow-write]` | Serve MCP over stdio |
 | `cigar version` | Show version and build information |
 
@@ -97,17 +95,16 @@ The current server provides `cigar_query`, `cigar_inspect`, and `cigar_status`;
 
 `cigar init` writes `.cig/config.toml`. Configuration precedence is CLI flags,
 then `CIGAR_*` environment variables, then the configuration file, then built-in
-defaults. The generated configuration retains legacy embedding settings and
-fingerprinting; changing them can require `cigar reindex`. The default query
-and sync paths do not instantiate an embedding model.
+defaults. The default query and sync paths do not instantiate an embedding model.
 
-The local state includes `.cig/store.db`, `.cig/HEAD` (the indexed commit hash),
-branch references and a writer lock. The current schema still uses sqlite-vec
-and branch-specific content-addressed manifests, unlike the target schema.
+The local state includes `.cig/store.db`, `.cig/HEAD` and a writer lock. Each
+namespace holds one snapshot, not independent branch manifests. After switching
+branches, run `cigar sync` to update the snapshot. Dirty sync invalidates the
+commit baseline so the next commit sync reconciles the complete tree.
 
-Stores created with schema version 2 must not be opened as version 3. Preserve
-the old index by moving the entire `.cig` directory aside, then run `cigar init`
-and `cigar sync` to create a fresh index.
+Schema versions 2 and 3 cannot be opened as version 4. Preserve the old index by
+moving the entire `.cig` directory aside, then run `cigar init` and `cigar sync`
+to create a fresh index.
 
 ## Tests
 
@@ -117,5 +114,6 @@ for additional target verification criteria.
 
 ## License
 
-Engine code: MIT OR Apache-2.0. The embedding models are not bundled; consult
-their published licenses and revisions before downloading them.
+Engine code is licensed under the [Mozilla Public License 2.0](LICENSE).
+The embedding models are not bundled; consult their published licenses and
+revisions before downloading them.

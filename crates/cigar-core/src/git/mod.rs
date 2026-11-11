@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Git and filesystem source adapters (docs/11).
 //!
 //! The Git adapter uses `gix` directly, never the `git` CLI, for HEAD, tree

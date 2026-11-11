@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! `cigar` command-line entry point.
 //!
 //! The CLI is a thin shell: it parses arguments, assembles adapters, and

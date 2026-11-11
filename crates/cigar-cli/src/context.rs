@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Runtime environment discovery: repository root, CIGAR directory, config load.
 
 use std::collections::BTreeMap;
@@ -131,6 +133,14 @@ impl Context {
     /// Branch used when `--branch` is absent; Git is authoritative.
     pub fn resolve_branch(&self) -> Result<BranchName> {
         if let Some(branch) = &self.branch_override {
+            let current = self
+                .git_head_branch()?
+                .unwrap_or(BranchName::parse("main")?);
+            if branch != &current {
+                return Err(EngineError::invalid(
+                    "indeks lexical hanya mendukung branch checkout saat ini",
+                ));
+            }
             return Ok(branch.clone());
         }
         if let Some(branch) = self.git_head_branch()? {

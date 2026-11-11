@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! `gix`-backed source provider.
 
 use std::path::{Path, PathBuf};

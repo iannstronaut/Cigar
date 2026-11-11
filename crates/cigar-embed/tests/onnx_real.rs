@@ -1,4 +1,6 @@
-﻿//! Tests that exercise a real ONNX model. Ignored by default because they need
+﻿// SPDX-License-Identifier: MPL-2.0
+
+//! Tests that exercise a real ONNX model. Ignored by default because they need
 //! a downloaded model and the ONNX Runtime shared library:
 //!
 //! ```text

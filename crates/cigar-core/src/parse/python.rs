@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Python parser (docs/07 sections 4.4, 8.5).
 
 use tree_sitter::{Node, Tree};

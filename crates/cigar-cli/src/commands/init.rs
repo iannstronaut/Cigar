@@ -1,13 +1,15 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! `cigar init` (docs/10 ?4).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use cigar_core::config::{render_default_config, Config};
-use cigar_core::domain::{ConfigFingerprint, GitMode, Namespace, SyncMode, SyncStatus};
+use cigar_core::domain::GitMode;
 use cigar_core::error::{EngineError, Result};
-use cigar_core::{ENGINE_VERSION, SCHEMA_VERSION};
-use cigar_storage::{open_or_init_store, record_model_meta, StoreLock};
+use cigar_core::SCHEMA_VERSION;
+use cigar_storage::{StoreLock, TargetStore};
 
 use crate::cli::InitArgs;
 use crate::context::Context;
@@ -43,41 +45,12 @@ pub fn run(context: &Context, args: &InitArgs, printer: &Printer) -> Result<i32>
     write_config_atomic(&context.config_path, &config)?;
 
     let fingerprint = config.fingerprint()?;
-    let store = open_or_init_store(&context.store_path(), config.embedding.dimensions)?
-        .with_search_config(&config.search);
-
-    record_model_meta(
-        &store,
-        &[
-            ("schema_version", SCHEMA_VERSION.to_string()),
-            ("content_version", cigar_core::CONTENT_VERSION.to_string()),
-            ("engine_version", ENGINE_VERSION.to_owned()),
-            ("embedding_model", config.embedding.model.clone()),
-            ("embedding_revision", resolved_revision(&config)),
-            (
-                "embedding_dimensions",
-                config.embedding.dimensions.to_string(),
-            ),
-            (
-                "embedding_template_version",
-                config.embedding.template_version.to_string(),
-            ),
-            ("distance_metric", "cosine".to_owned()),
-            ("config_fingerprint", fingerprint.to_string()),
-        ],
-    )?;
+    let _store = TargetStore::open(&context.store_path(), true)?;
 
     let branch = context.resolve_branch()?;
     let branch_name = branch.clone();
     write_head_ref(&context.cig_dir)?;
     write_branch_marker(&context.cig_dir, &branch_name, None)?;
-    initialise_branch_state(
-        &store,
-        &config.engine.namespace,
-        &branch_name,
-        &fingerprint,
-        config.git.mode,
-    )?;
 
     exclude_state_dir(&context.root, git_mode)?;
 
@@ -94,12 +67,6 @@ pub fn run(context: &Context, args: &InitArgs, printer: &Printer) -> Result<i32>
             "branch": branch_name.to_string(),
             "search": { "mode": config.search.mode },
             "namespace": config.engine.namespace.to_string(),
-            "embedding": {
-                "provider": config.embedding.provider.to_string(),
-                "model": config.embedding.model,
-                "dimensions": config.embedding.dimensions,
-                "template_version": config.embedding.template_version,
-            },
             "config_fingerprint": fingerprint.to_string(),
         });
         printer.json_document(&payload);
@@ -127,16 +94,6 @@ pub fn run(context: &Context, args: &InitArgs, printer: &Printer) -> Result<i32>
     Ok(0)
 }
 
-fn resolved_revision(config: &Config) -> String {
-    if !config.embedding.revision.is_empty() {
-        return config.embedding.revision.clone();
-    }
-    if config.embedding.provider == cigar_core::domain::EmbeddingProvider::Fake {
-        return "fake-v1".into();
-    }
-    "unresolved".into()
-}
-
 fn create_state_dir(cig_dir: &Path) -> Result<()> {
     fs::create_dir_all(cig_dir).map_err(|err| EngineError::io(cig_dir, err))?;
     restrict_permissions(cig_dir)?;
@@ -161,18 +118,12 @@ fn write_config_atomic(path: &Path, config: &Config) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| EngineError::io(parent, err))?;
     }
+    if path.exists() {
+        return Ok(());
+    }
     let text = render_default_config(config);
     let temp = path.with_extension("toml.tmp");
     fs::write(&temp, text.as_bytes()).map_err(|err| EngineError::io(&temp, err))?;
-    if path.exists() {
-        // Preserve a user-edited file; only overwrite when the content differs
-        // because `--force` asked for repair.
-        let existing = fs::read_to_string(path).map_err(|err| EngineError::io(path, err))?;
-        if existing == text {
-            fs::remove_file(&temp).ok();
-            return Ok(());
-        }
-    }
     fs::rename(&temp, path).map_err(|err| EngineError::io(path, err))?;
     Ok(())
 }
@@ -216,37 +167,6 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::write(&temp, bytes).map_err(|err| EngineError::io(&temp, err))?;
     fs::rename(&temp, path).map_err(|err| EngineError::io(path, err))?;
     Ok(())
-}
-
-fn initialise_branch_state(
-    store: &cigar_storage::SqliteStore,
-    namespace: &Namespace,
-    branch: &cigar_core::domain::BranchName,
-    fingerprint: &ConfigFingerprint,
-    _mode: GitMode,
-) -> Result<()> {
-    use cigar_core::traits::ContextStore;
-    if store.get_branch_state(namespace, branch)?.is_some() {
-        return Ok(());
-    }
-    let state = cigar_core::domain::BranchState {
-        namespace: namespace.clone(),
-        branch: branch.clone(),
-        commit_hash: None,
-        last_sync_mode: SyncMode::Commit,
-        status: SyncStatus::Ready,
-        worktree_fingerprint: None,
-        config_fingerprint: fingerprint.clone(),
-        updated_at_ms: now_ms(),
-    };
-    store.set_branch_state(namespace, &state)
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as i64)
 }
 
 fn exclude_state_dir(root: &Path, mode: GitMode) -> Result<()> {

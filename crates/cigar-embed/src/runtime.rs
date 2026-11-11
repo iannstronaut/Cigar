@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! ONNX Runtime dynamic library discovery (docs/08 section 6).
 //!
 //! `ort` is built with `load-dynamic`, so the runtime ships as a sidecar DLL.

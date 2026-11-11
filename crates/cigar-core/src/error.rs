@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Error taxonomy (docs/06 ?8).
 //!
 //! `EngineError` is the only public error type. It is `#[non_exhaustive]` so new

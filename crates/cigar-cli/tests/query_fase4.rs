@@ -1,5 +1,7 @@
-//! Fase 4 tests: query ranking, budget, branch isolation, graph expansion,
-//! inspect resolution and ambiguity.
+// SPDX-License-Identifier: MPL-2.0
+
+//! Query ranking, budget, snapshot replacement, graph expansion,
+//! inspect resolution and ambiguity for the v4 lexical index.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -75,19 +77,8 @@ fn run(args: &[&str], cwd: &Path) -> (i32, String, String) {
     )
 }
 
-/// Uses the fake embedder: deterministic, offline, fast.
 fn init_and_sync(repo: &Repo) {
-    let (code, _out, err) = run(
-        &[
-            "init",
-            "--no-model",
-            "--embedding",
-            "fake",
-            "--dimensions",
-            "64",
-        ],
-        repo.root(),
-    );
+    let (code, _out, err) = run(&["init"], repo.root());
     assert_eq!(code, 0, "{err}");
     let (code, _out, err) = run(&["sync"], repo.root());
     assert_eq!(code, 0, "{err}");
@@ -110,13 +101,12 @@ fn query_returns_ranked_results_with_relations() {
     let (code, stdout, stderr) = run(&["query", "validate token", "--json"], repo.root());
     assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["schema_version"], 3);
-    assert_eq!(value["index"]["branch"], "main");
-    assert_eq!(value["index"]["stale"], false);
+    assert_eq!(value["schema_version"], 4);
+    assert!(value["namespace"].is_string());
+    assert_eq!(value["query"], "validate token");
     let results = value["results"].as_array().unwrap();
     assert!(!results.is_empty());
-    // The fake embedder is deterministic but not semantic, so this asserts
-    // structure and ranking invariants rather than semantic relevance.
+    // Check ranking and the v4 lexical response structure.
     let first = &results[0];
     assert_eq!(first["rank"], 1);
     assert!(first["symbol"]["file"]
@@ -125,8 +115,7 @@ fn query_returns_ranked_results_with_relations() {
         .starts_with("src/"));
     assert!(first["score"].as_f64().unwrap() > 0.0);
     assert!(first["symbol"]["signature"].is_string());
-    // Relations are present as arrays even when empty.
-    assert!(first["relations"]["callers"].is_array());
+    assert!(first["relations"].is_array());
 }
 
 #[test]
@@ -134,9 +123,10 @@ fn query_honours_token_budget() {
     let repo = Repo::new();
     repo.write(
         "src/big.rs",
-        &(0..60)
-            .map(|i| format!("pub fn function_{i}() -> i32 {{ {i} }}\n"))
-            .collect::<String>(),
+        &format!(
+            "pub fn function_long() -> &'static str {{ \"{}\" }}\n",
+            "x".repeat(2000)
+        ),
     );
     repo.commit("init");
     init_and_sync(&repo);
@@ -155,9 +145,13 @@ fn query_honours_token_budget() {
     );
     assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let used = value["stats"]["tokens_estimated"].as_u64().unwrap();
-    assert!(used <= 300, "tokens {used} melebihi budget");
-    assert!(!value["results"].as_array().unwrap().is_empty());
+    let results = value["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+    let used: usize = results
+        .iter()
+        .map(|result| result["symbol"]["code"].as_str().unwrap().len())
+        .sum();
+    assert_eq!(used, 300 * 4, "code budget should truncate the long symbol");
     assert_eq!(value["results"][0]["rank"], 1);
 }
 
@@ -202,7 +196,9 @@ fn path_filter_restricts_results() {
     );
     assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    for result in value["results"].as_array().unwrap() {
+    let results = value["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+    for result in results {
         let file = result["symbol"]["file"].as_str().unwrap();
         assert!(file.starts_with("src/auth/"), "{file}");
     }
@@ -224,13 +220,15 @@ fn kind_filter_restricts_results() {
     );
     assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    for result in value["results"].as_array().unwrap() {
+    let results = value["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+    for result in results {
         assert_eq!(result["symbol"]["kind"], "struct");
     }
 }
 
 #[test]
-fn branch_isolation_holds_for_queries() {
+fn sync_replaces_the_single_snapshot_after_branch_changes() {
     let repo = Repo::new();
     repo.write("src/shared.rs", "pub fn shared_helper() {}\n");
     repo.commit("init");
@@ -239,46 +237,35 @@ fn branch_isolation_holds_for_queries() {
     repo.checkout("feat/only", true);
     repo.write("src/feature.rs", "pub fn feature_only_marker() {}\n");
     repo.commit("feature");
-    let (code, _out, err) = run(&["sync"], repo.root());
+    let (code, _, err) = run(&["sync"], repo.root());
     assert_eq!(code, 0, "{err}");
-
-    // On the feature branch the feature symbol is visible.
-    let (code, stdout, stderr) = run(
-        &["query", "feature only marker", "--json", "--top-k", "3"],
-        repo.root(),
-    );
+    let (code, stdout, stderr) = run(&["query", "feature_only_marker", "--json"], repo.root());
     assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["index"]["branch"], "feat/only");
     assert!(value["results"]
         .as_array()
         .unwrap()
         .iter()
         .any(|result| result["symbol"]["file"] == "src/feature.rs"));
 
-    // The main branch must not contain it.
-    let (code, stdout, stderr) = run(
-        &["query", "feature only marker", "--branch", "main", "--json"],
-        repo.root(),
-    );
+    repo.checkout("main", false);
+    let (code, _, err) = run(&["sync"], repo.root());
+    assert_eq!(code, 0, "{err}");
+    let (code, stdout, stderr) = run(&["query", "feature_only_marker", "--json"], repo.root());
     assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(!value["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|result| result["symbol"]["file"] == "src/feature.rs"));
+    assert!(value["results"].as_array().unwrap().is_empty());
 }
 
 #[test]
-fn query_on_unindexed_branch_is_actionable() {
+fn query_rejects_a_branch_other_than_checkout() {
     let repo = Repo::new();
     repo.write("src/a.rs", "pub fn a() {}\n");
     repo.commit("init");
     init_and_sync(&repo);
     let (code, _out, stderr) = run(&["query", "a", "--branch", "nope"], repo.root());
-    assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("cigar sync --branch nope"), "{stderr}");
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("branch checkout saat ini"), "{stderr}");
 }
 
 #[test]
@@ -294,27 +281,41 @@ fn inspect_resolves_by_qualified_name_and_shows_relations() {
     let (code, stdout, stderr) = run(&["inspect", "S::run", "--json"], repo.root());
     assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["schema_version"], 4);
+    assert!(value["namespace"].is_string());
     assert_eq!(value["symbol"]["qualified_name"], "S::run");
     assert_eq!(value["symbol"]["kind"], "method");
-    let callees = value["relations"]["callees"].as_array().unwrap();
-    assert!(callees
-        .iter()
-        .any(|view| view["qualified_name"] == "S::helper"));
+    let relations = value["relations"].as_array().unwrap();
+    assert!(relations.iter().any(
+        |relation| relation["symbol"]["qualified_name"] == "S::helper"
+            && relation["relation"] == "CALLS"
+            && relation["incoming"] == false
+            && relation["depth"] == 1
+    ));
 }
 
 #[test]
-fn inspect_ambiguous_lists_candidates_and_exits_1() {
+fn inspect_ambiguous_reports_error_and_file_filter_disambiguates() {
     let repo = Repo::new();
     repo.write("src/a.rs", "pub fn dup() {}\n");
     repo.write("src/b.rs", "pub fn dup() {}\n");
     repo.commit("init");
     init_and_sync(&repo);
 
-    let (code, stdout, stderr) = run(&["inspect", "dup", "--json"], repo.root());
-    assert_eq!(code, 1, "{stderr}");
+    let (code, _stdout, stderr) = run(&["inspect", "dup", "--json"], repo.root());
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("nama simbol ambigu: dup (2 kandidat)"),
+        "{stderr}"
+    );
+
+    let (code, stdout, stderr) = run(
+        &["inspect", "dup", "--file", "src/a.rs", "--json"],
+        repo.root(),
+    );
+    assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["ambiguous"], true);
-    assert_eq!(value["count"], 2);
+    assert_eq!(value["symbol"]["file"], "src/a.rs");
 }
 
 #[test]
@@ -339,7 +340,22 @@ fn depth_zero_has_no_relations() {
     );
     assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(value["relations"]["callees"].as_array().unwrap().is_empty());
+    assert!(value["relations"].as_array().unwrap().is_empty());
+
+    let (code, stdout, stderr) = run(
+        &["inspect", "caller", "--depth", "1", "--json"],
+        repo.root(),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(value["relations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|relation| relation["symbol"]["name"] == "callee"
+            && relation["relation"] == "CALLS"
+            && relation["incoming"] == false
+            && relation["depth"] == 1));
 }
 
 #[test]
@@ -350,9 +366,7 @@ fn text_output_labels_untrusted_content() {
     init_and_sync(&repo);
     let (code, stdout, stderr) = run(&["query", "a", "--top-k", "1"], repo.root());
     assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("# CIGAR context"), "{stdout}");
-    assert!(stdout.contains("query: \"a\""), "{stdout}");
     assert!(stdout.contains("UNTRUSTED REPOSITORY CONTENT"), "{stdout}");
-    assert!(stdout.contains("```rust"), "{stdout}");
-    assert!(stdout.contains("index: branch=main"), "{stdout}");
+    assert!(stdout.contains("src/a.rs"), "{stdout}");
+    assert!(stdout.contains("pub fn a()"), "{stdout}");
 }

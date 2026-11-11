@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! End-to-end CLI tests for Fase 1: `init`, `status`, `version`.
 
 use std::path::Path;
@@ -29,17 +31,7 @@ fn init_creates_state_and_is_idempotent() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    let (code, stdout, stderr) = run(
-        &[
-            "init",
-            "--no-model",
-            "--embedding",
-            "fake",
-            "--dimensions",
-            "64",
-        ],
-        root,
-    );
+    let (code, stdout, stderr) = run(&["init", "--offline"], root);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("diinisialisasi"), "{stdout}");
 
@@ -51,17 +43,7 @@ fn init_creates_state_and_is_idempotent() {
     let head = std::fs::read_to_string(cig.join("HEAD")).unwrap();
     assert!(head.is_empty());
 
-    let (code, stdout, stderr) = run(
-        &[
-            "init",
-            "--no-model",
-            "--embedding",
-            "fake",
-            "--dimensions",
-            "64",
-        ],
-        root,
-    );
+    let (code, stdout, stderr) = run(&["init", "--offline"], root);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("sudah diinisialisasi"), "{stdout}");
 }
@@ -118,11 +100,14 @@ fn status_reports_empty_index_as_json() {
     let (code, stdout, stderr) = run(&["status", "--json"], root);
     assert_eq!(code, 0, "stderr: {stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("JSON valid");
-    assert_eq!(value["schema_version"], 3);
+    assert_eq!(value["schema_version"], cigar_core::SCHEMA_VERSION);
     assert_eq!(value["stats"]["files"], 0);
     assert_eq!(value["stats"]["symbols"], 0);
     assert_eq!(value["branch"], "main");
     assert_eq!(value["namespace"], "default");
+    assert_eq!(value["search"]["mode"], "lexical-graph");
+    assert!(value.get("model").is_none());
+    assert!(value["stats"].get("vectors").is_none());
 }
 
 #[test]
@@ -142,8 +127,7 @@ fn status_verify_detects_clean_store() {
     );
     let (code, stdout, stderr) = run(&["status", "--verify"], root);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("foreign_key_check: ok"), "{stdout}");
-    assert!(stdout.contains("quick_check: ok"), "{stdout}");
+    assert!(stdout.contains("Verification: ok"), "{stdout}");
 }
 
 #[test]
@@ -162,13 +146,17 @@ fn invalid_namespace_is_usage_error() {
 }
 
 #[test]
-fn version_reports_schema_and_sqlite_vec() {
+fn version_reports_schema_and_sqlite() {
     let dir = TempDir::new().unwrap();
     let (code, stdout, stderr) = run(&["version"], dir.path());
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("cigar "), "{stdout}");
-    assert!(stdout.contains("schema: 3"), "{stdout}");
-    assert!(stdout.contains("sqlite-vec: v"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("schema: {}", cigar_core::SCHEMA_VERSION)),
+        "{stdout}"
+    );
+    assert!(stdout.contains("sqlite: "), "{stdout}");
+    assert!(!stdout.contains("sqlite-vec"), "{stdout}");
 }
 
 #[test]
@@ -177,8 +165,9 @@ fn version_json_is_machine_readable() {
     let (code, stdout, stderr) = run(&["version", "--json"], dir.path());
     assert_eq!(code, 0, "stderr: {stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("JSON valid");
-    assert_eq!(value["schema_version"], 3);
-    assert!(value["sqlite_vec"].as_str().unwrap().starts_with('v'));
+    assert_eq!(value["schema_version"], cigar_core::SCHEMA_VERSION);
+    assert!(value["sqlite"].is_string());
+    assert!(value.get("sqlite_vec").is_none());
 }
 
 #[test]

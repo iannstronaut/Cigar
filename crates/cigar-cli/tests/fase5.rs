@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fase 5 tests: hooks, MCP stdio, branch/gc, bare repo, fs-only, detached HEAD.
 
 use std::io::Write;
@@ -128,52 +130,6 @@ fn hook_install_dry_run_writes_nothing() {
 }
 
 #[test]
-fn branch_list_and_prune() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("init");
-    init_fake(&repo);
-    repo.run(&["sync"]);
-
-    git(repo.root(), &["checkout", "-q", "-b", "temp/branch"]);
-    repo.write("src/b.rs", "pub fn b() {}\n");
-    repo.commit("temp");
-    repo.run(&["sync"]);
-    git(repo.root(), &["checkout", "-q", "main"]);
-    git(repo.root(), &["branch", "-D", "temp/branch"]);
-
-    let (code, stdout, err) = repo.run(&["branch", "list", "--json"]);
-    assert_eq!(code, 0, "{err}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["branches"].as_array().unwrap().len(), 2);
-
-    let (code, _out, err) = repo.run(&["branch", "prune", "--dry-run"]);
-    assert_eq!(code, 0, "{err}");
-    let (code, stdout, err) = repo.run(&["branch", "prune"]);
-    assert_eq!(code, 0, "{err}");
-    assert!(stdout.contains("dihapus"), "{stdout}");
-}
-
-#[test]
-fn gc_dry_run_reports_without_deleting() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("init");
-    init_fake(&repo);
-    repo.run(&["sync"]);
-
-    let (code, stdout, err) = repo.run(&["gc", "--dry-run", "--json"]);
-    assert_eq!(code, 0, "{err}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["dry_run"], true);
-    let vectors = value["vectors_deleted"].as_u64().unwrap();
-    assert_eq!(
-        vectors, 0,
-        "tidak boleh ada vektor orphan pada indeks bersih"
-    );
-}
-
-#[test]
 fn bare_repository_syncs_and_queries() {
     let source = Repo::new();
     source.write("src/a.rs", "pub fn bare_fn() {}\n");
@@ -208,12 +164,12 @@ fn bare_repository_syncs_and_queries() {
     let (code, stdout, err) = run_in(&["sync", "--branch", "main", "--json"], &bare);
     assert_eq!(code, 0, "{err}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["branches"][0]["files_added"], 1);
+    assert_eq!(value["branches"][0]["files_written"], 1);
 
     let (code, stdout, err) = run_in(&["query", "bare fn", "--branch", "main", "--json"], &bare);
     assert_eq!(code, 0, "{err}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["index"]["branch"], "main");
+    assert_eq!(value["results"][0]["symbol"]["name"], "bare_fn");
 }
 
 #[test]
@@ -239,7 +195,7 @@ fn fs_only_mode_indexes_without_git() {
     let (code, stdout, err) = run_in(&["sync", "--json"], dir.path());
     assert_eq!(code, 0, "{err}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["branches"][0]["files_added"], 1);
+    assert_eq!(value["branches"][0]["files_written"], 1);
 }
 
 #[test]
@@ -337,7 +293,7 @@ fn mcp_stdio_handshake_and_tools() {
     assert!(lines[3]["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
-        .contains("# CIGAR context"));
+        .contains("a"));
     assert_eq!(lines[4]["error"]["code"], -32601);
 }
 

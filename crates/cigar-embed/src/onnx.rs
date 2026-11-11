@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Local ONNX embedding backend.
 //!
 //! Uses `ort` (runtime) + `tokenizers` for CPU inference. The model is loaded

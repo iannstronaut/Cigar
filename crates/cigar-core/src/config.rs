@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Configuration model, defaults, validation, and precedence (docs/10 section16).
 //!
 //! Precedence is CLI flag > environment (`CIGAR_*`) > `.cig/config.toml` >
@@ -678,28 +680,6 @@ pub fn render_default_config(config: &Config) -> String {
     let _ = writeln!(out, "signature = {:?}", config.search.weights.signature);
     let _ = writeln!(out, "docstring = {:?}", config.search.weights.docstring);
     let _ = writeln!(out, "code_tokens = {:?}", config.search.weights.code_tokens);
-    out.push_str("\n[embedding]\n");
-    let _ = writeln!(out, "provider = \"{}\"", config.embedding.provider);
-    let _ = writeln!(out, "model = \"{}\"", config.embedding.model);
-    let _ = writeln!(out, "revision = \"{}\"", config.embedding.revision);
-    let _ = writeln!(out, "dimensions = {}", config.embedding.dimensions);
-    let model_dir = escape_toml_string(&config.embedding.model_dir.display().to_string());
-    let _ = writeln!(out, "model_dir = \"{model_dir}\"");
-    let _ = writeln!(out, "batch_size = {}", config.embedding.batch_size);
-    let _ = writeln!(out, "max_tokens = {}", config.embedding.max_tokens);
-    let _ = writeln!(out, "max_code_chars = {}", config.embedding.max_code_chars);
-    let _ = writeln!(
-        out,
-        "template_version = {}",
-        config.embedding.template_version
-    );
-    let _ = writeln!(out, "pooling = \"{}\"", config.embedding.pooling);
-    let _ = writeln!(out, "threads = {}", config.embedding.threads);
-    let _ = writeln!(out, "normalize = {}", config.embedding.normalize);
-    let query_prefix = escape_toml_string(&config.embedding.query_prefix);
-    let _ = writeln!(out, "query_prefix = \"{query_prefix}\"");
-    let document_prefix = escape_toml_string(&config.embedding.document_prefix);
-    let _ = writeln!(out, "document_prefix = \"{document_prefix}\"");
     out.push_str("\n[storage]\n");
     let _ = writeln!(out, "driver = \"{}\"", config.storage.driver);
     out.push_str("uri = \".cig/store.db\"\n");

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Semantic relevance test against a real ONNX model.
 //!
 //! Ignored by default; requires a downloaded model and ONNX Runtime:

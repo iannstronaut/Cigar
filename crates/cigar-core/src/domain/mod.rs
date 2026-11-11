@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Canonical domain model.
 //!
 //! Re-exports the identifiers, enums, and records so callers can depend on a

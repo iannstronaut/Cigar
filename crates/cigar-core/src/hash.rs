@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Hashing and embedding-template rendering.
 //!
 //! All identifiers are domain-separated BLAKE3 digests with `0x00` field

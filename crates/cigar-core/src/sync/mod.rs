@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Incremental sync pipeline (docs/04).
 //!
 //! The pipeline is deliberately staged so each step can be tested alone:
@@ -13,6 +15,7 @@
 mod delta;
 mod pipeline;
 pub mod plan;
+pub mod target;
 
 pub use delta::{compute_delta, DeltaPlan, FileTask};
 pub use pipeline::{

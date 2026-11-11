@@ -1,816 +1,382 @@
-//! Contract tests every `ContextStore` implementation must satisfy.
-//!
-//! These exercise the invariants that doc 04/21 require: atomic batches, vector
-//! ownership, branch isolation, and referential integrity.
+// SPDX-License-Identifier: MPL-2.0
 
-use cigar_core::domain::{
-    BranchBatch, BranchFileContent, BranchName, BranchState, ConfigFingerprint, ContentBatch,
-    ContentFile, Digest, EmbeddingKey, Language, Namespace, ParsedSymbolContent, RepoPath,
-    SymbolDef, SymbolKind, SyncMode, SyncStatus,
-};
-use cigar_core::traits::ContextStore;
-use cigar_storage::{open_or_init_store, SqliteStore};
+//! Integration contracts for the namespace-scoped target index.
+
+use cigar_storage::{TargetBatch, TargetEdge, TargetFile, TargetStore, TargetSymbol};
+use rusqlite::Connection;
 use tempfile::TempDir;
 
-const DIMENSIONS: usize = 8;
-
-fn open() -> (TempDir, SqliteStore) {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("store.db");
-    let store = open_or_init_store(&path, DIMENSIONS).unwrap();
+fn open() -> (TempDir, TargetStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TargetStore::open(&dir.path().join("index.sqlite"), true).unwrap();
     (dir, store)
 }
 
-fn namespace() -> Namespace {
-    Namespace::default()
-}
-
-fn branch(name: &str) -> BranchName {
-    BranchName::parse(name).unwrap()
-}
-
-fn fingerprint() -> ConfigFingerprint {
-    cigar_core::hash::config_fingerprint("fake", "fake-v1", DIMENSIONS, 1, "l2").unwrap()
-}
-
-fn symbol(name: &str) -> SymbolDef {
-    let hash = cigar_core::hash::symbol_hash(
-        Language::Rust,
-        SymbolKind::Function,
-        name,
-        &format!("fn {name}()"),
-        None,
-        &format!("body-{name}"),
-        1,
-    );
-    SymbolDef {
-        symbol_hash: hash,
-        language: Language::Rust,
+fn symbol(id: &str, name: &str, tokens: &str) -> TargetSymbol {
+    TargetSymbol {
+        symbol_id: id.into(),
         name: name.into(),
-        qualified_name: name.into(),
-        kind: SymbolKind::Function,
+        qualified_name: format!("module::{name}"),
+        tokenized_name: tokens.into(),
+        kind: "function".into(),
         signature: format!("fn {name}()"),
-        docstring: None,
-        code_snippet: format!("fn {name}() {{\n    let x = {name};\n}}"),
-        body_hash: Digest::parse(format!("{:064x}", 42)).unwrap(),
+        code_snippet: format!("fn {name}() {{}}"),
+        code_tokens: tokens.into(),
+        start_line: 1,
+        end_line: 2,
+        body_hash: format!("body-{id}"),
+        ..Default::default()
     }
 }
 
-fn content(blob_seed: u8, symbols: &[SymbolDef], imports: &str) -> ContentFile {
-    ContentFile {
-        blob_hash: cigar_core::domain::BlobHash::parse(format!("{blob_seed:064x}")).unwrap(),
-        language: Language::Rust,
-        imports: imports.into(),
-        size_bytes: 128,
-        symbols: symbols
-            .iter()
-            .enumerate()
-            .map(|(index, symbol)| ParsedSymbolContent {
-                symbol: symbol.clone(),
-                start_line: 1 + index as u32 * 5,
-                end_line: 4 + index as u32 * 5,
-            })
-            .collect(),
-        edges: vec![],
+fn file(id: &str, path: &str, symbols: Vec<TargetSymbol>) -> TargetFile {
+    TargetFile {
+        file_id: id.into(),
+        file_path: path.into(),
+        language: "rust".into(),
+        blob_hash: format!("blob-{id}"),
+        imports_text: "use module;".into(),
+        symbols,
     }
 }
 
-fn vector(seed: f32) -> Vec<f32> {
-    let mut out = vec![0.0; DIMENSIONS];
-    out[0] = seed;
-    out[1] = (1.0 - seed * seed).max(0.0).sqrt();
-    out
-}
-
-fn key_for(text: &str) -> EmbeddingKey {
-    cigar_core::hash::embedding_key(1, text)
-}
-
-#[test]
-fn content_batch_is_atomic_and_idempotent() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let alpha = symbol("alpha");
-    let beta = symbol("beta");
-    let batch = ContentBatch {
-        files: vec![content(1, &[alpha.clone(), beta.clone()], "use std::fmt;")],
-        removed_blobs: vec![],
-    };
-
-    store.apply_content_batch(&ns, batch.clone()).unwrap();
-    store.apply_content_batch(&ns, batch).unwrap();
-
-    let blob = cigar_core::domain::BlobHash::parse(format!("{:064x}", 1)).unwrap();
-    let symbols = store.blob_symbols(&blob, Language::Rust).unwrap();
-    assert_eq!(symbols.len(), 2);
-    assert_eq!(symbols[0].imports, "use std::fmt;");
+fn batch(namespace: &str, commit: &str, files: Vec<TargetFile>) -> TargetBatch {
+    TargetBatch {
+        namespace: namespace.into(),
+        commit_hash: commit.into(),
+        updated_at: 123,
+        files,
+        ..Default::default()
+    }
 }
 
 #[test]
-fn lexical_search_works_without_vectors_and_is_branch_scoped() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let main = branch("main");
-    let feature = branch("feature");
-    let alpha = symbol("verifyJwtToken");
-    let blob = cigar_core::domain::BlobHash::parse(format!("{:064x}", 2)).unwrap();
+fn initializes_v4_schema_and_reopens_existing_store() {
+    let (dir, store) = open();
+    assert!(store.health_check().unwrap().is_empty());
+    drop(store);
 
-    store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![content(2, std::slice::from_ref(&alpha), "")],
-                removed_blobs: vec![],
-            },
+    let path = dir.path().join("index.sqlite");
+    let db = Connection::open(&path).unwrap();
+    let version: String = db
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
         )
         .unwrap();
-
-    let key = key_for("alpha-template");
-    let batch = BranchBatch {
-        files: vec![BranchFileContent {
-            file_path: RepoPath::parse("src/lib.rs").unwrap(),
-            blob_hash: blob.clone(),
-            language: Language::Rust,
-            symbols: vec![cigar_core::domain::BranchSymbolRow {
-                symbol_hash: alpha.symbol_hash.clone(),
-                start_line: 1,
-                end_line: 4,
-                embedding_key: key,
-                embedding_text: "alpha-template".into(),
-            }],
-            edges: vec![],
-        }],
-        removed_files: vec![],
-        state: None,
-    };
-    store.apply_branch_batch(&ns, &main, batch).unwrap();
-    let hits = store.search_lexical(&ns, &main, "jwt token", 10).unwrap();
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].symbol_hash, alpha.symbol_hash);
-    assert!(hits[0].score > 0.0);
-    assert!(store
-        .search_lexical(&ns, &feature, "jwt", 10)
-        .unwrap()
-        .is_empty());
-    assert!(store
-        .search_lexical(&ns, &main, "!!!", 10)
-        .unwrap()
-        .is_empty());
-    assert!(store
-        .search_lexical(&ns, &main, "jwt", 0)
-        .unwrap()
-        .is_empty());
-    let health = store.health_check().unwrap();
-    assert!(health.ok, "{health:?}");
-    assert_eq!(health.symbols_without_vectors, 1);
+    assert_eq!(version, "4");
+    for table in ["sync_state", "files", "symbols", "edges", "symbols_fts"] {
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists, "missing {table}");
+    }
+    drop(db);
+    let reopened = TargetStore::open(&path, false).unwrap();
+    assert_eq!(reopened.stats("main").unwrap().symbols, 0);
+    assert!(reopened.health_check().unwrap().is_empty());
 }
 
 #[test]
-fn lexical_settings_control_indexing_and_ranking() {
+fn namespaces_isolate_search_names_files_graph_and_sync_state() {
     let (_dir, store) = open();
-    let ns = namespace();
-    let main = branch("main");
-    let mut search = cigar_core::config::Config::default().search;
-    search.split_identifiers = false;
-    let store = store.with_search_config(&search);
-    let mut named = symbol("needle");
-    named.signature = "fn unrelated()".into();
-    named.code_snippet = "fn unrelated() {}".into();
-    let mut documented = symbol("other");
-    documented.docstring = Some("needle".into());
-    let compound = symbol("verifyJwtToken");
-    let symbols = vec![named.clone(), documented.clone(), compound];
-    let file = content(19, &symbols, "");
+    let mut source = symbol("a-source", "caller", "shared caller");
+    source.edges.push(TargetEdge {
+        target_name: "callee".into(),
+        relation: "calls".into(),
+        ..Default::default()
+    });
     store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![file.clone()],
-                removed_blobs: vec![],
-            },
-        )
+        .apply_batch(&batch(
+            "a",
+            "a1",
+            vec![file(
+                "a-file",
+                "src/lib.rs",
+                vec![source, symbol("a-target", "callee", "shared callee")],
+            )],
+        ))
         .unwrap();
-    let rows = symbols
-        .iter()
-        .enumerate()
-        .map(|(i, symbol)| cigar_core::domain::BranchSymbolRow {
-            symbol_hash: symbol.symbol_hash.clone(),
-            start_line: 1 + i as u32 * 5,
-            end_line: 4 + i as u32 * 5,
-            embedding_key: key_for(&symbol.name),
-            embedding_text: symbol.name.clone(),
-        })
-        .collect();
     store
-        .apply_branch_batch(
-            &ns,
-            &main,
-            BranchBatch {
-                files: vec![BranchFileContent {
-                    file_path: RepoPath::parse("src/test.rs").unwrap(),
-                    blob_hash: file.blob_hash,
-                    language: Language::Rust,
-                    symbols: rows,
-                    edges: vec![],
-                }],
-                removed_files: vec![],
-                state: None,
-            },
-        )
+        .apply_batch(&batch(
+            "b",
+            "b1",
+            vec![file(
+                "b-file",
+                "src/lib.rs",
+                vec![symbol("b-target", "callee", "shared callee")],
+            )],
+        ))
         .unwrap();
-    assert!(store
-        .search_lexical(&ns, &main, "jwt", 10)
-        .unwrap()
-        .is_empty());
+
+    assert_eq!(store.search("a", "shared", 10).unwrap().len(), 2);
     assert_eq!(
-        store.search_lexical(&ns, &main, "needle", 1).unwrap()[0].symbol_hash,
-        named.symbol_hash
+        store.search("b", "shared", 10).unwrap()[0].symbol_id,
+        "b-target"
     );
-    search.weights.qualified_name = 0.0;
-    search.weights.docstring = 100.0;
-    let store = store.with_search_config(&search);
     assert_eq!(
-        store.search_lexical(&ns, &main, "needle", 1).unwrap()[0].symbol_hash,
-        documented.symbol_hash
+        store.find_symbols("a", "callee").unwrap()[0].symbol_id,
+        "a-target"
     );
+    assert_eq!(
+        store.find_symbols("b", "module::callee").unwrap()[0].symbol_id,
+        "b-target"
+    );
+    assert!(store.neighbors("b", "a-source").unwrap().is_empty());
+    assert_eq!(
+        store.neighbors("a", "a-source").unwrap()[0]
+            .symbol
+            .symbol_id,
+        "a-target"
+    );
+    assert_eq!(store.stats("a").unwrap().edges, 1);
+    assert_eq!(store.stats("b").unwrap().edges, 0);
+    assert_eq!(store.files("a").unwrap()[0].file_path, "src/lib.rs");
+    assert_eq!(store.sync_head("a").unwrap().as_deref(), Some("a1"));
+    assert_eq!(store.sync_head("b").unwrap().as_deref(), Some("b1"));
+
+    let mut delete = batch("a", "a2", vec![]);
+    delete.deleted_paths.push("src/lib.rs".into());
+    store.apply_batch(&delete).unwrap();
+    assert!(store.search("a", "shared", 10).unwrap().is_empty());
+    assert_eq!(store.stats("a").unwrap().files, 0);
+    assert_eq!(store.search("b", "shared", 10).unwrap().len(), 1);
+    assert_eq!(store.sync_head("b").unwrap().as_deref(), Some("b1"));
 }
 
 #[test]
-fn lexical_ranking_applies_centrality_before_top_k() {
+fn replacing_and_deleting_files_updates_fts_and_metadata() {
     let (_dir, store) = open();
-    let ns = namespace();
-    let main = branch("main");
-    let mut symbols: Vec<_> = (0..64)
-        .map(|i| {
-            let mut caller = symbol(&format!("caller{i}"));
-            caller.code_snippet.push_str(" needle");
-            caller
-        })
-        .collect();
-    let mut target = symbol("target");
-    target
-        .code_snippet
-        .push_str(" needle filler filler filler filler filler filler filler filler");
-    symbols.push(target.clone());
-    let file = content(3, &symbols, "");
-    let rows = symbols
-        .iter()
-        .enumerate()
-        .map(|(i, symbol)| cigar_core::domain::BranchSymbolRow {
-            symbol_hash: symbol.symbol_hash.clone(),
-            start_line: 1 + i as u32 * 5,
-            end_line: 4 + i as u32 * 5,
-            embedding_key: key_for(&symbol.name),
-            embedding_text: symbol.name.clone(),
-        })
-        .collect();
-    let edges = symbols[..64]
-        .iter()
-        .map(|caller| cigar_core::domain::BranchEdgeRow {
-            source_symbol_hash: caller.symbol_hash.clone(),
-            target_name: target.name.clone(),
-            relation: cigar_core::domain::EdgeRelation::Calls,
-            target_symbol_hash: Some(target.symbol_hash.clone()),
-        })
-        .collect();
     store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![file.clone()],
-                removed_blobs: vec![],
-            },
-        )
+        .apply_batch(&batch(
+            "main",
+            "one",
+            vec![file(
+                "file",
+                "lib.rs",
+                vec![symbol("old", "old_name", "obsoleteuniquetoken")],
+            )],
+        ))
         .unwrap();
-    store
-        .apply_branch_batch(
-            &ns,
-            &main,
-            BranchBatch {
-                files: vec![BranchFileContent {
-                    file_path: RepoPath::parse("src/lib.rs").unwrap(),
-                    blob_hash: file.blob_hash,
-                    language: Language::Rust,
-                    symbols: rows,
-                    edges,
-                }],
-                removed_files: vec![],
-                state: None,
-            },
-        )
-        .unwrap();
-    let hits = store.search_lexical(&ns, &main, "needle", 1).unwrap();
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].symbol_hash, target.symbol_hash);
-}
-
-#[test]
-fn branch_batch_is_atomic_with_vectors() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let main = branch("main");
-    let alpha = symbol("alpha");
-    let blob = cigar_core::domain::BlobHash::parse(format!("{:064x}", 3)).unwrap();
-    let key = key_for("alpha-template");
-
-    store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![content(3, std::slice::from_ref(&alpha), "")],
-                removed_blobs: vec![],
-            },
-        )
-        .unwrap();
-    store
-        .ensure_vectors(&ns, &[(key.clone(), vector(1.0))])
-        .unwrap();
-
-    let batch = BranchBatch {
-        files: vec![BranchFileContent {
-            file_path: RepoPath::parse("src/lib.rs").unwrap(),
-            blob_hash: blob,
-            language: Language::Rust,
-            symbols: vec![cigar_core::domain::BranchSymbolRow {
-                symbol_hash: alpha.symbol_hash.clone(),
-                start_line: 1,
-                end_line: 4,
-                embedding_key: key,
-                embedding_text: "alpha-template".into(),
-            }],
-            edges: vec![],
-        }],
-        removed_files: vec![],
-        state: Some(BranchState {
-            namespace: ns.clone(),
-            branch: main.clone(),
-            commit_hash: None,
-            last_sync_mode: SyncMode::Commit,
-            status: SyncStatus::Ready,
-            worktree_fingerprint: None,
-            config_fingerprint: fingerprint(),
-            updated_at_ms: 1,
-        }),
-    };
-    let outcome = store.apply_branch_batch(&ns, &main, batch).unwrap();
-    assert_eq!(outcome.files_written, 1);
-    assert_eq!(store.get_branch_manifest(&ns, &main).unwrap().len(), 1);
-}
-
-#[test]
-fn search_is_scoped_to_branch() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let main = branch("main");
-    let feature = branch("feat/auth");
-
-    let alpha = symbol("alpha");
-    let beta = symbol("beta");
-    let blob_main = cigar_core::domain::BlobHash::parse(format!("{:064x}", 4)).unwrap();
-    let blob_feature = cigar_core::domain::BlobHash::parse(format!("{:064x}", 5)).unwrap();
-    let key_alpha = key_for("alpha");
-    let key_beta = key_for("beta");
-
-    store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![
-                    content(4, std::slice::from_ref(&alpha), ""),
-                    content(5, std::slice::from_ref(&beta), ""),
-                ],
-                removed_blobs: vec![],
-            },
-        )
-        .unwrap();
-    store
-        .ensure_vectors(
-            &ns,
-            &[
-                (key_alpha.clone(), vector(1.0)),
-                (key_beta.clone(), vector(0.0)),
-            ],
-        )
-        .unwrap();
-
-    let state = |branch: &BranchName| BranchState {
-        namespace: ns.clone(),
-        branch: branch.clone(),
-        commit_hash: None,
-        last_sync_mode: SyncMode::Commit,
-        status: SyncStatus::Ready,
-        worktree_fingerprint: None,
-        config_fingerprint: fingerprint(),
-        updated_at_ms: 1,
-    };
-
-    store
-        .apply_branch_batch(
-            &ns,
-            &main,
-            BranchBatch {
-                files: vec![BranchFileContent {
-                    file_path: RepoPath::parse("src/main.rs").unwrap(),
-                    blob_hash: blob_main,
-                    language: Language::Rust,
-                    symbols: vec![cigar_core::domain::BranchSymbolRow {
-                        symbol_hash: alpha.symbol_hash.clone(),
-                        start_line: 1,
-                        end_line: 4,
-                        embedding_key: key_alpha.clone(),
-                        embedding_text: "alpha".into(),
-                    }],
-                    edges: vec![],
-                }],
-                removed_files: vec![],
-                state: Some(state(&main)),
-            },
-        )
-        .unwrap();
-    store
-        .apply_branch_batch(
-            &ns,
-            &feature,
-            BranchBatch {
-                files: vec![BranchFileContent {
-                    file_path: RepoPath::parse("src/feature.rs").unwrap(),
-                    blob_hash: blob_feature,
-                    language: Language::Rust,
-                    symbols: vec![cigar_core::domain::BranchSymbolRow {
-                        symbol_hash: beta.symbol_hash.clone(),
-                        start_line: 1,
-                        end_line: 4,
-                        embedding_key: key_beta.clone(),
-                        embedding_text: "beta".into(),
-                    }],
-                    edges: vec![],
-                }],
-                removed_files: vec![],
-                state: Some(state(&feature)),
-            },
-        )
-        .unwrap();
-
-    let main_hits = store.search_symbols(&ns, &main, &vector(1.0), 5).unwrap();
-    assert_eq!(main_hits.len(), 1);
-    assert_eq!(main_hits[0].file_path.as_str(), "src/main.rs");
-    assert_eq!(main_hits[0].symbol_hash, alpha.symbol_hash);
-
-    let feature_hits = store
-        .search_symbols(&ns, &feature, &vector(1.0), 5)
-        .unwrap();
-    assert_eq!(feature_hits.len(), 1);
-    assert_eq!(feature_hits[0].file_path.as_str(), "src/feature.rs");
-    assert_eq!(feature_hits[0].symbol_hash, beta.symbol_hash);
-}
-
-#[test]
-fn removing_file_cascades_branch_rows_only() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let main = branch("main");
-    let alpha = symbol("alpha");
-    let blob = cigar_core::domain::BlobHash::parse(format!("{:064x}", 6)).unwrap();
-    let key = key_for("alpha");
-
-    store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![content(6, std::slice::from_ref(&alpha), "")],
-                removed_blobs: vec![],
-            },
-        )
-        .unwrap();
-    store
-        .ensure_vectors(&ns, &[(key.clone(), vector(1.0))])
-        .unwrap();
-    store
-        .apply_branch_batch(
-            &ns,
-            &main,
-            BranchBatch {
-                files: vec![BranchFileContent {
-                    file_path: RepoPath::parse("src/lib.rs").unwrap(),
-                    blob_hash: blob.clone(),
-                    language: Language::Rust,
-                    symbols: vec![cigar_core::domain::BranchSymbolRow {
-                        symbol_hash: alpha.symbol_hash.clone(),
-                        start_line: 1,
-                        end_line: 4,
-                        embedding_key: key,
-                        embedding_text: "alpha".into(),
-                    }],
-                    edges: vec![],
-                }],
-                removed_files: vec![],
-                state: None,
-            },
-        )
-        .unwrap();
-
-    store
-        .apply_branch_batch(
-            &ns,
-            &main,
-            BranchBatch {
-                files: vec![],
-                removed_files: vec![RepoPath::parse("src/lib.rs").unwrap()],
-                state: None,
-            },
-        )
-        .unwrap();
-
-    assert!(store.get_branch_manifest(&ns, &main).unwrap().is_empty());
-    assert_eq!(store.blob_symbols(&blob, Language::Rust).unwrap().len(), 1);
-}
-
-#[test]
-fn removing_blob_is_refused_while_referenced() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let main = branch("main");
-    let alpha = symbol("alpha");
-    let blob = cigar_core::domain::BlobHash::parse(format!("{:064x}", 7)).unwrap();
-    let key = key_for("alpha");
-
-    store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![content(7, std::slice::from_ref(&alpha), "")],
-                removed_blobs: vec![],
-            },
-        )
-        .unwrap();
-    store
-        .ensure_vectors(&ns, &[(key.clone(), vector(1.0))])
-        .unwrap();
-    store
-        .apply_branch_batch(
-            &ns,
-            &main,
-            BranchBatch {
-                files: vec![BranchFileContent {
-                    file_path: RepoPath::parse("src/lib.rs").unwrap(),
-                    blob_hash: blob.clone(),
-                    language: Language::Rust,
-                    symbols: vec![cigar_core::domain::BranchSymbolRow {
-                        symbol_hash: alpha.symbol_hash.clone(),
-                        start_line: 1,
-                        end_line: 4,
-                        embedding_key: key,
-                        embedding_text: "alpha".into(),
-                    }],
-                    edges: vec![],
-                }],
-                removed_files: vec![],
-                state: None,
-            },
-        )
-        .unwrap();
-
-    store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![],
-                removed_blobs: vec![(blob.clone(), Language::Rust)],
-            },
-        )
-        .unwrap();
-    assert_eq!(store.blob_symbols(&blob, Language::Rust).unwrap().len(), 1);
-}
-
-#[test]
-fn health_check_reports_clean_store() {
-    let (_dir, store) = open();
-    let health = store.health_check().unwrap();
-    assert!(health.ok, "{health:?}");
-    assert!(health.quick_check_ok);
-    assert_eq!(health.foreign_key_violations, 0);
-}
-
-#[test]
-fn schema_version_and_branch_state_round_trip() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let main = branch("main");
-    assert_eq!(store.schema_version().unwrap(), 3);
-    assert!(store.get_branch_state(&ns, &main).unwrap().is_none());
-
-    let state = BranchState {
-        namespace: ns.clone(),
-        branch: main.clone(),
-        commit_hash: Some(cigar_core::domain::CommitId::parse("a".repeat(40)).unwrap()),
-        last_sync_mode: SyncMode::Dirty,
-        status: SyncStatus::Dirty,
-        worktree_fingerprint: Some(Digest::parse("b".repeat(64)).unwrap()),
-        config_fingerprint: fingerprint(),
-        updated_at_ms: 1_700_000_000_000,
-    };
-    store.set_branch_state(&ns, &state).unwrap();
-    assert_eq!(store.get_branch_state(&ns, &main).unwrap(), Some(state));
-    assert_eq!(store.list_branches(&ns).unwrap().len(), 1);
-}
-
-#[test]
-fn vector_keys_round_trip() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let key = key_for("vector-a");
-    let other = key_for("vector-b");
     assert_eq!(
         store
-            .ensure_vectors(&ns, &[(key.clone(), vector(1.0))])
-            .unwrap(),
+            .search("main", "obsoleteuniquetoken", 10)
+            .unwrap()
+            .len(),
         1
     );
-    assert_eq!(
-        store
-            .ensure_vectors(&ns, &[(key.clone(), vector(1.0))])
-            .unwrap(),
-        0
-    );
-    let existing = store
-        .existing_vector_keys(&ns, &[key.clone(), other])
-        .unwrap();
-    assert_eq!(existing, vec![true, false]);
-}
-
-#[test]
-fn dimension_mismatch_is_rejected() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let error = store
-        .ensure_vectors(&ns, &[(key_for("bad"), vec![0.0; 3])])
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        cigar_core::EngineError::DimensionMismatch { .. }
-    ));
-    let error = store
-        .search_symbols(&ns, &branch("main"), &[0.0; 3], 5)
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        cigar_core::EngineError::DimensionMismatch { .. }
-    ));
-}
-
-#[test]
-fn symbol_hash_collision_is_detected() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let mut alpha = symbol("alpha");
-    let original = alpha.clone();
-    alpha.code_snippet = "fn alpha() { different(); }".into();
 
     store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![content(8, std::slice::from_ref(&original), "")],
-                removed_blobs: vec![],
-            },
-        )
-        .unwrap();
-    let error = store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![content(9, std::slice::from_ref(&alpha), "")],
-                removed_blobs: vec![],
-            },
-        )
-        .unwrap_err();
-    assert!(matches!(error, cigar_core::EngineError::IdCollision { .. }));
-}
-
-#[test]
-fn edges_resolve_and_backfill() {
-    let (_dir, store) = open();
-    let ns = namespace();
-    let main = branch("main");
-    let caller = symbol("caller");
-    let callee = symbol("callee");
-    let blob = cigar_core::domain::BlobHash::parse(format!("{:064x}", 10)).unwrap();
-    let key = key_for("caller");
-
-    store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![
-                    content(10, std::slice::from_ref(&caller), ""),
-                    content(12, std::slice::from_ref(&callee), ""),
-                ],
-                removed_blobs: vec![],
-            },
-        )
-        .unwrap();
-    store
-        .ensure_vectors(&ns, &[(key.clone(), vector(1.0))])
-        .unwrap();
-
-    let edge = cigar_core::domain::BranchEdgeRow {
-        source_symbol_hash: caller.symbol_hash.clone(),
-        target_name: "callee".into(),
-        relation: cigar_core::domain::EdgeRelation::Calls,
-        target_symbol_hash: None,
-    };
-    store
-        .apply_branch_batch(
-            &ns,
-            &main,
-            BranchBatch {
-                files: vec![BranchFileContent {
-                    file_path: RepoPath::parse("src/lib.rs").unwrap(),
-                    blob_hash: blob,
-                    language: Language::Rust,
-                    symbols: vec![cigar_core::domain::BranchSymbolRow {
-                        symbol_hash: caller.symbol_hash.clone(),
-                        start_line: 1,
-                        end_line: 4,
-                        embedding_key: key,
-                        embedding_text: "caller".into(),
-                    }],
-                    edges: vec![edge],
-                }],
-                removed_files: vec![],
-                state: None,
-            },
-        )
-        .unwrap();
-
-    let unresolved = store
-        .unresolved_edges_for_name(&ns, &main, "callee", 10)
-        .unwrap();
-    assert_eq!(unresolved.len(), 1);
-    assert_eq!(unresolved[0].source_symbol_hash, caller.symbol_hash);
-
-    store
-        .resolve_edge(&ns, &main, &unresolved[0], &callee.symbol_hash)
+        .apply_batch(&batch(
+            "main",
+            "two",
+            vec![file(
+                "file",
+                "lib.rs",
+                vec![symbol("new", "new_name", "freshuniquetoken")],
+            )],
+        ))
         .unwrap();
     assert!(store
-        .unresolved_edges_for_name(&ns, &main, "callee", 10)
+        .search("main", "obsoleteuniquetoken", 10)
         .unwrap()
         .is_empty());
+    assert!(store.find_symbols("main", "old_name").unwrap().is_empty());
+    let hits = store.search("main", "freshuniquetoken", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].symbol_id, "new");
+    assert_eq!(hits[0].file_path, "lib.rs");
+    assert_eq!(hits[0].imports_text, "use module;");
+    assert_eq!(store.stats("main").unwrap().symbols, 1);
+
+    let mut delete = batch("main", "three", vec![]);
+    delete.deleted_paths.push("lib.rs".into());
+    store.apply_batch(&delete).unwrap();
+    assert!(store
+        .search("main", "freshuniquetoken", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store.find_symbols("main", "new_name").unwrap().is_empty());
+    assert_eq!(store.stats("main").unwrap().files, 0);
+    assert_eq!(store.sync_head("main").unwrap().as_deref(), Some("three"));
+    assert!(store.health_check().unwrap().is_empty());
 }
 
 #[test]
-fn stats_counts_rows() {
+fn search_ties_are_ordered_by_id_before_limit() {
     let (_dir, store) = open();
-    let ns = namespace();
-    let main = branch("main");
-    let alpha = symbol("alpha");
-    let blob = cigar_core::domain::BlobHash::parse(format!("{:064x}", 11)).unwrap();
-    let key = key_for("alpha");
+    let mut first = symbol("z-id", "same", "identicaltoken");
+    let mut second = first.clone();
+    second.symbol_id = "a-id".into();
+    first.body_hash = "same-body".into();
+    second.body_hash = "same-body".into();
+    store
+        .apply_batch(&batch(
+            "main",
+            "one",
+            vec![file("file", "lib.rs", vec![first, second])],
+        ))
+        .unwrap();
+    let hits = store.search("main", "identicaltoken", 10).unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].score, hits[1].score);
+    assert_eq!(
+        hits.iter()
+            .map(|hit| hit.symbol_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-id", "z-id"]
+    );
+    assert_eq!(
+        store.search("main", "identicaltoken", 1).unwrap()[0].symbol_id,
+        "a-id"
+    );
+    assert!(store
+        .search("main", "identicaltoken", 0)
+        .unwrap()
+        .is_empty());
+    assert!(store.search("main", "  ", 10).unwrap().is_empty());
+}
+
+#[test]
+fn graph_links_forward_references_and_relinks_after_ambiguity_and_deletion() {
+    let (_dir, store) = open();
+    let mut caller = symbol("caller", "caller", "caller");
+    caller.edges.push(TargetEdge {
+        target_name: "callee".into(),
+        relation: "calls".into(),
+        ..Default::default()
+    });
+    store
+        .apply_batch(&batch(
+            "main",
+            "one",
+            vec![file("source-file", "source.rs", vec![caller])],
+        ))
+        .unwrap();
+    assert!(store.neighbors("main", "caller").unwrap().is_empty());
+    assert_eq!(store.stats("main").unwrap().edges, 1);
 
     store
-        .apply_content_batch(
-            &ns,
-            ContentBatch {
-                files: vec![content(11, std::slice::from_ref(&alpha), "")],
-                removed_blobs: vec![],
-            },
-        )
+        .apply_batch(&batch(
+            "main",
+            "two",
+            vec![file(
+                "target-file",
+                "target.rs",
+                vec![symbol("target", "callee", "callee")],
+            )],
+        ))
         .unwrap();
-    store
-        .ensure_vectors(&ns, &[(key.clone(), vector(1.0))])
-        .unwrap();
-    store
-        .apply_branch_batch(
-            &ns,
-            &main,
-            BranchBatch {
-                files: vec![BranchFileContent {
-                    file_path: RepoPath::parse("src/lib.rs").unwrap(),
-                    blob_hash: blob,
-                    language: Language::Rust,
-                    symbols: vec![cigar_core::domain::BranchSymbolRow {
-                        symbol_hash: alpha.symbol_hash.clone(),
-                        start_line: 1,
-                        end_line: 4,
-                        embedding_key: key,
-                        embedding_text: "alpha".into(),
-                    }],
-                    edges: vec![cigar_core::domain::BranchEdgeRow {
-                        source_symbol_hash: alpha.symbol_hash.clone(),
-                        target_name: "missing".into(),
-                        relation: cigar_core::domain::EdgeRelation::Calls,
-                        target_symbol_hash: None,
-                    }],
-                }],
-                removed_files: vec![],
-                state: None,
-            },
-        )
-        .unwrap();
+    let outgoing = store.neighbors("main", "caller").unwrap();
+    assert_eq!(outgoing.len(), 1);
+    assert_eq!(outgoing[0].symbol.symbol_id, "target");
+    assert_eq!(outgoing[0].relation, "calls");
+    assert!(!outgoing[0].incoming);
+    let incoming = store.neighbors("main", "target").unwrap();
+    assert_eq!(incoming.len(), 1);
+    assert_eq!(incoming[0].symbol.symbol_id, "caller");
+    assert!(incoming[0].incoming);
+    assert_eq!(
+        store.find_symbols("main", "callee").unwrap()[0].in_degree,
+        1
+    );
 
-    let stats = store.stats(&ns, &main).unwrap();
-    assert_eq!(stats.files, 1);
-    assert_eq!(stats.symbols, 1);
-    assert_eq!(stats.vectors, 1);
-    assert_eq!(stats.unresolved_edges, 1);
+    store
+        .apply_batch(&batch(
+            "main",
+            "three",
+            vec![file(
+                "duplicate-file",
+                "duplicate.rs",
+                vec![symbol("duplicate", "callee", "callee")],
+            )],
+        ))
+        .unwrap();
+    assert!(store.neighbors("main", "caller").unwrap().is_empty());
+    assert!(store
+        .find_symbols("main", "callee")
+        .unwrap()
+        .iter()
+        .all(|hit| hit.in_degree == 0));
+    let mut delete = batch("main", "four", vec![]);
+    delete.deleted_paths.push("duplicate.rs".into());
+    store.apply_batch(&delete).unwrap();
+    assert_eq!(
+        store.neighbors("main", "caller").unwrap()[0]
+            .symbol
+            .symbol_id,
+        "target"
+    );
+    assert_eq!(
+        store.find_symbols("main", "callee").unwrap()[0].in_degree,
+        1
+    );
+    assert!(store.health_check().unwrap().is_empty());
+}
+
+#[test]
+fn failed_batch_rolls_back_deletes_inserts_fts_and_sync_head() {
+    let (_dir, store) = open();
+    store
+        .apply_batch(&batch(
+            "main",
+            "before",
+            vec![file(
+                "original-file",
+                "original.rs",
+                vec![symbol("original", "original", "originaltoken")],
+            )],
+        ))
+        .unwrap();
+    let duplicate = symbol("duplicate", "duplicate", "newtoken");
+    let mut invalid = batch(
+        "main",
+        "after",
+        vec![file(
+            "new-file",
+            "new.rs",
+            vec![duplicate.clone(), duplicate],
+        )],
+    );
+    invalid.deleted_paths.push("original.rs".into());
+    assert!(store.apply_batch(&invalid).is_err());
+    assert_eq!(store.sync_head("main").unwrap().as_deref(), Some("before"));
+    assert_eq!(store.files("main").unwrap()[0].file_path, "original.rs");
+    assert_eq!(
+        store.search("main", "originaltoken", 10).unwrap()[0].symbol_id,
+        "original"
+    );
+    assert!(store.search("main", "newtoken", 10).unwrap().is_empty());
+    let stats = store.stats("main").unwrap();
+    assert_eq!((stats.files, stats.symbols, stats.edges), (1, 1, 0));
+    assert!(store.health_check().unwrap().is_empty());
+}
+
+#[test]
+fn health_check_detects_missing_fts_entry() {
+    let (dir, store) = open();
+    store
+        .apply_batch(&batch(
+            "main",
+            "one",
+            vec![file(
+                "file",
+                "lib.rs",
+                vec![symbol("symbol", "name", "searchable")],
+            )],
+        ))
+        .unwrap();
+    assert!(store.health_check().unwrap().is_empty());
+    let db = Connection::open(dir.path().join("index.sqlite")).unwrap();
+    db.execute("DELETE FROM symbols_fts WHERE symbol_id = ?1", ["symbol"])
+        .unwrap();
+    let problems = store.health_check().unwrap();
+    assert!(problems
+        .iter()
+        .any(|problem| problem.contains("symbols_fts mismatch")));
 }

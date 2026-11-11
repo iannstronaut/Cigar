@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Embedding adapters: deterministic fake for tests and ONNX for production.
 
 #[cfg(feature = "semantic")]

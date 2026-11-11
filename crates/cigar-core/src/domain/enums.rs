@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Enumerations shared by the domain, storage, and CLI.
 
 use std::fmt;

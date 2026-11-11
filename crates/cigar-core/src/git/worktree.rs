@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Filesystem scanning for dirty mode and fs-only sources.
 //!
 //! Dirty mode never trusts mtimes: every candidate file is read and hashed with

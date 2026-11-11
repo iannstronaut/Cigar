@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Delta computation for one branch (docs/04 sections 4-5).
 //!
 //! Commit mode uses the Git tree diff from the last synced commit to HEAD.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! JavaScript parser. Shares the TypeScript extractor with the JS grammar, which
 //! keeps symbol/edge semantics identical across the JS family (docs/07).
 

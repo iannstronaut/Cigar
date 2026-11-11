@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Exclusive store lock (docs/04 section12, docs/10 section15).
 //!
 //! Uses an OS advisory file lock as the authority. The metadata file content is

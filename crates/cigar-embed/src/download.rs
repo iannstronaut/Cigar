@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Model download with checksum verification (docs/08 sections 6-7).
 //!
 //! Downloads are explicit: `sync` never fetches. Every artifact is verified

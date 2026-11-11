@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Output formatting helpers. stdout is data; stderr is diagnostics.
 
 use std::io::Write;

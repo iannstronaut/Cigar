@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Query pipeline: retrieval, graph expansion, and context packing
 //! (docs/05 sections 4-8).
 //!
@@ -182,6 +184,20 @@ fn related_json(view: &RelatedView) -> serde_json::Value {
 
 fn round3(value: f32) -> f64 {
     (f64::from(value) * 1000.0).round() / 1000.0
+}
+
+/// Convert user text to a safe FTS5 expression without exposing FTS syntax.
+pub fn lexical_query(query: &str, split_identifiers: bool) -> Result<String> {
+    let normalized = crate::sync::target::normalize_identifiers(query, split_identifiers);
+    let terms: Vec<String> = normalized
+        .split_whitespace()
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{term}\""))
+        .collect();
+    if terms.is_empty() {
+        return Err(EngineError::invalid("query harus mengandung kata"));
+    }
+    Ok(terms.join(" OR "))
 }
 
 /// Runs the full query pipeline.
@@ -893,6 +909,23 @@ pub fn render_text(response: &QueryResponse, max_tokens: usize) -> String {
 mod tests {
     use super::*;
     use crate::domain::{Digest, EmbeddingKey, SymbolDef};
+
+    #[test]
+    fn lexical_query_escapes_fts_operators() {
+        assert_eq!(
+            lexical_query("foo OR bar: baz*", true).unwrap(),
+            "\"foo\" OR \"or\" OR \"bar\" OR \"baz\""
+        );
+        assert!(lexical_query("\"()*", true).is_err());
+        assert_eq!(
+            lexical_query("validate_token validateToken", true).unwrap(),
+            "\"validate\" OR \"token\" OR \"validate\" OR \"token\""
+        );
+        assert_eq!(
+            lexical_query("validate_token validateToken", false).unwrap(),
+            "\"validate_token\" OR \"validatetoken\""
+        );
+    }
 
     fn occurrence(code: &str, start: u32) -> SymbolOccurrence {
         SymbolOccurrence {

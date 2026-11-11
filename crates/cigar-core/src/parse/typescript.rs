@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! TypeScript, TSX, and JavaScript parser (docs/07 sections 4.2, 8.3, 9).
 //!
 //! One implementation serves TypeScript, TSX, and JavaScript because the node

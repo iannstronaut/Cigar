@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Domain records.
 //!
 //! These types are shared between adapters and are deliberately free of storage
@@ -8,6 +10,56 @@ use crate::domain::{
     OccurrenceRef, RepoPath, SymbolHash, SymbolKind, SyncMode, SyncStatus,
 };
 use crate::hash::EmbeddingTemplate;
+/// A namespace mutation committed in a single storage transaction.
+#[derive(Clone, Debug, Default)]
+pub struct TargetBatch {
+    pub namespace: String,
+    pub deleted_paths: Vec<String>,
+    pub files: Vec<TargetFile>,
+    pub commit_hash: String,
+    pub updated_at: i64,
+    pub split_identifiers: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TargetFile {
+    pub file_id: String,
+    pub file_path: String,
+    pub language: String,
+    pub blob_hash: String,
+    pub imports_text: String,
+    pub symbols: Vec<TargetSymbol>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TargetSymbol {
+    pub symbol_id: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub tokenized_name: String,
+    pub kind: String,
+    pub signature: String,
+    pub docstring: Option<String>,
+    pub code_snippet: String,
+    pub code_tokens: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub body_hash: String,
+    pub edges: Vec<TargetEdge>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TargetEdge {
+    pub target_name: String,
+    pub target_symbol_id: Option<String>,
+    pub relation: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TargetFileState {
+    pub file_path: String,
+    pub blob_hash: String,
+}
 
 /// State row for one `(namespace, branch)` pair.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! `cigar version` (docs/10 ?14).
 
 use cigar_core::error::Result;
@@ -19,7 +21,6 @@ pub fn run(_context: &Context, args: &VersionArgs, printer: &Printer) -> Result<
             "template_version": cigar_core::TEMPLATE_VERSION,
             "rustc": rustc_version(),
             "sqlite": sqlite,
-            "sqlite_vec": sqlite_vec_version(),
             "target": target,
         });
         printer.json_document(&payload);
@@ -30,26 +31,13 @@ pub fn run(_context: &Context, args: &VersionArgs, printer: &Printer) -> Result<
     printer.line(&format!("schema: {}", cigar_core::SCHEMA_VERSION));
     printer.line(&format!("rustc: {}", rustc_version()));
     printer.line(&format!("sqlite: {sqlite}"));
-    printer.line(&format!("sqlite-vec: {}", sqlite_vec_version()));
     printer.line(&format!("target: {target}"));
     let _ = format_timestamp(0);
     Ok(0)
 }
 
 fn sqlite_version() -> String {
-    cigar_storage::register_sqlite_vec();
     rusqlite::version().to_owned()
-}
-
-fn sqlite_vec_version() -> String {
-    rusqlite::Connection::open_in_memory()
-        .ok()
-        .and_then(|connection| {
-            connection
-                .query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
-                .ok()
-        })
-        .unwrap_or_else(|| "unavailable".into())
 }
 
 fn rustc_version() -> &'static str {

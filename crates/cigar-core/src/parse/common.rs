@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared tree-sitter helpers: parser construction, byte ranges, line numbers,
 //! and identifier extraction.
 

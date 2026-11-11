@@ -274,7 +274,6 @@ dependencies = [
  "fs2",
  "rusqlite",
  "serde",
- "sqlite-vec",
  "tempfile",
  "thiserror",
 ]
@@ -2478,15 +2477,6 @@ dependencies = [
  "nom",
  "serde",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "sqlite-vec"
-version = "0.1.7-alpha.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9dad2e5788b411800d8e15d55ee2c672ba0c0c87076713a1e6e2c9b83372a92"
-dependencies = [
- "cc",
 ]
 
 [[package]]

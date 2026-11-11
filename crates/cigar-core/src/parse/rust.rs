@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Rust parser (docs/07 sections 4.1, 8.2, 9).
 
 use tree_sitter::{Node, Tree};

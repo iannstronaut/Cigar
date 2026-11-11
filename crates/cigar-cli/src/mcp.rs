@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Minimal MCP stdio server (docs/12).
 //!
 //! Implements JSON-RPC 2.0 over newline-delimited JSON on stdin/stdout, the
@@ -8,13 +10,10 @@ use std::io::{BufRead, Write};
 
 use serde_json::{json, Value};
 
-use cigar_core::domain::{BranchName, SymbolKind};
-use cigar_core::error::{EngineError, Result};
-use cigar_core::query::{render_text, QueryEngine, QueryOptions};
-use cigar_core::traits::ContextStore;
-
-use crate::commands::query::{index_info, resolve_indexed_branch};
+use crate::commands::{inspect, query};
 use crate::context::Context;
+use cigar_core::domain::BranchName;
+use cigar_core::error::{EngineError, Result};
 
 /// Supported protocol versions, newest first.
 const SUPPORTED_VERSIONS: &[&str] = &["2025-03-26", "2024-11-05"];
@@ -293,13 +292,17 @@ fn call_tool(context: &Context, options: &McpOptions, params: &Value) -> Result<
 }
 
 fn tool_query(context: &Context, arguments: &Value) -> Result<Value> {
-    let query = arguments
+    let text = arguments
         .get("query")
         .and_then(Value::as_str)
         .ok_or_else(|| EngineError::invalid("query wajib berupa string"))?;
     let store = open_store(context)?;
-    let branch = resolve_branch_arg(context, &store, arguments)?;
-
+    validate_branch(context, arguments)?;
+    let paths = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .map(|s| vec![s.to_owned()])
+        .unwrap_or_default();
     let kinds = arguments
         .get("kind")
         .and_then(Value::as_array)
@@ -307,152 +310,74 @@ fn tool_query(context: &Context, arguments: &Value) -> Result<Value> {
             items
                 .iter()
                 .filter_map(Value::as_str)
-                .filter_map(|value| value.parse::<SymbolKind>().ok())
+                .map(str::to_owned)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let path = arguments
-        .get("path")
-        .and_then(Value::as_str)
-        .map(|value| vec![value.to_owned()])
-        .unwrap_or_default();
-
-    let options = QueryOptions {
-        top_k: clamp_usize(arguments, "top_k", context.config.query.top_k, 1, 50),
-        depth: clamp_u8(arguments, "depth", context.config.query.depth, 0, 2),
-        max_tokens: clamp_usize(
+    let value = query::query(
+        &store,
+        context.namespace.as_str(),
+        text,
+        clamp_usize(arguments, "top_k", context.config.query.top_k, 1, 50),
+        &paths,
+        &kinds,
+        clamp_u8(arguments, "depth", context.config.query.depth, 0, 3),
+        context.config.query.max_neighbors,
+        clamp_usize(
             arguments,
             "max_tokens",
             context.config.query.max_tokens,
             256,
             32_000,
         ),
-        max_neighbors: context.config.query.max_neighbors,
-        path_globs: path,
-        kinds,
-        min_score: arguments
+        arguments
             .get("min_score")
             .and_then(Value::as_f64)
-            .map(|value| value as f32),
-    };
-
-    let index = index_info(context, &store, &branch)?;
-    let engine = QueryEngine::new(&store, None);
-    let response = engine.run(&context.namespace, &branch, query, &options, index)?;
-    Ok(tool_success(
-        &render_text(&response, options.max_tokens),
-        response.to_json(),
-    ))
+            .map(|v| v as f32),
+        &context.config.search,
+    )?;
+    Ok(tool_success(&query::render(&value), value))
 }
 
 fn tool_inspect(context: &Context, arguments: &Value) -> Result<Value> {
-    let symbol = arguments
+    let name = arguments
         .get("symbol")
         .and_then(Value::as_str)
         .ok_or_else(|| EngineError::invalid("symbol wajib berupa string"))?;
     let store = open_store(context)?;
-    let branch = resolve_branch_arg(context, &store, arguments)?;
-    let depth = clamp_u8(arguments, "depth", 1, 0, 3);
-    let file = arguments.get("file").and_then(Value::as_str);
-
-    let candidates = store.find_symbols(&context.namespace, &branch, symbol, 50)?;
-    let candidates = match file {
-        Some(pattern) => candidates
-            .into_iter()
-            .filter(|candidate| candidate.file_path.as_str() == pattern)
-            .collect::<Vec<_>>(),
-        None => candidates,
-    };
-
-    match candidates.len() {
-        0 => Err(EngineError::NotFound {
-            entity: "simbol".into(),
-            id: symbol.to_owned(),
-        }),
-        1 => {
-            let occurrence = &candidates[0];
-            let reference = cigar_core::domain::OccurrenceRef {
-                branch: branch.clone(),
-                file_path: occurrence.file_path.clone(),
-                symbol_hash: occurrence.symbol.symbol_hash.clone(),
-                start_line: occurrence.start_line,
-            };
-            let neighborhood =
-                store.get_neighbors(&context.namespace, &branch, &reference, depth)?;
-            let payload = serde_json::json!({
-                "schema_version": cigar_core::SCHEMA_VERSION,
-                "symbol": {
-                    "symbol_hash": occurrence.symbol.symbol_hash.to_string(),
-                    "qualified_name": occurrence.symbol.qualified_name,
-                    "kind": occurrence.symbol.kind.to_string(),
-                    "signature": occurrence.symbol.signature,
-                    "doc": occurrence.symbol.docstring,
-                    "file": occurrence.file_path.to_string(),
-                    "start_line": occurrence.start_line,
-                    "end_line": occurrence.end_line,
-                    "code": occurrence.symbol.code_snippet,
-                },
-                "relations": neighborhood_json(&neighborhood),
-            });
-            let text = format!(
-                "{} · {} · {}:{}-{}\n{}\n",
-                occurrence.symbol.qualified_name,
-                occurrence.symbol.kind,
-                occurrence.file_path,
-                occurrence.start_line,
-                occurrence.end_line,
-                occurrence.symbol.signature
-            );
-            Ok(tool_success(&text, payload))
-        }
-        // Ambiguity is a tool error with candidates listed, never a silent pick.
-        count => Err(EngineError::AmbiguousSymbol {
-            name: symbol.to_owned(),
-            count,
-        }),
-    }
+    validate_branch(context, arguments)?;
+    let value = inspect::inspect(
+        &store,
+        context.namespace.as_str(),
+        name,
+        arguments.get("file").and_then(Value::as_str),
+        clamp_u8(arguments, "depth", 1, 0, 3),
+    )?;
+    let symbol = &value["symbol"];
+    let text = format!(
+        "{} · {}:{}\n{}",
+        symbol["qualified_name"].as_str().unwrap_or(""),
+        symbol["file"].as_str().unwrap_or(""),
+        symbol["start_line"],
+        symbol["signature"].as_str().unwrap_or("")
+    );
+    Ok(tool_success(&text, value))
 }
 
 fn tool_status(context: &Context, arguments: &Value) -> Result<Value> {
     let store = open_store(context)?;
-    let branch = resolve_branch_arg(context, &store, arguments)?;
-    let state = store.get_branch_state(&context.namespace, &branch)?;
-    let stats = store.stats(&context.namespace, &branch)?;
-    let payload = serde_json::json!({
-        "schema_version": cigar_core::SCHEMA_VERSION,
-        "namespace": context.namespace.to_string(),
-        "branch": branch.to_string(),
-        "state": state.as_ref().map(|state| serde_json::json!({
-            "commit_hash": state.commit_hash.as_ref().map(|c| c.as_str().to_owned()),
-            "mode": state.last_sync_mode.to_string(),
-            "status": state.status.to_string(),
-            "updated_at_ms": state.updated_at_ms,
-        })),
-        "stats": {
-            "files": stats.files,
-            "symbols": stats.symbols,
-            "edges": stats.edges,
-            "vectors": stats.vectors,
-            "unresolved_edges": stats.unresolved_edges,
-            "db_size_bytes": stats.db_size_bytes,
-        },
-        "model": {
-            "provider": context.config.embedding.provider.to_string(),
-            "model": context.config.embedding.model,
-            "dimensions": context.config.embedding.dimensions,
-        },
-    });
-    let text = format!(
-        "branch={} status={} files={} symbols={} vectors={}",
-        branch,
-        state
-            .as_ref()
-            .map_or("unknown", |state| state.status.as_str()),
-        stats.files,
-        stats.symbols,
-        stats.vectors
-    );
-    Ok(tool_success(&text, payload))
+    validate_branch(context, arguments)?;
+    let branch = context.resolve_branch()?;
+    let head = store.sync_head(context.namespace.as_str())?;
+    let stats = store.stats(context.namespace.as_str())?;
+    let value = json!({"schema_version": cigar_core::SCHEMA_VERSION, "namespace": context.namespace.as_str(), "branch": branch.as_str(), "head": head, "stats": {"files": stats.files, "symbols": stats.symbols, "edges": stats.edges}, "search": {"mode": context.config.search.mode}});
+    Ok(tool_success(
+        &format!(
+            "branch={} files={} symbols={}",
+            branch, stats.files, stats.symbols
+        ),
+        value,
+    ))
 }
 
 fn tool_sync(context: &Context, arguments: &Value) -> Result<Value> {
@@ -483,7 +408,7 @@ fn tool_sync(context: &Context, arguments: &Value) -> Result<Value> {
     let symbols = value["branches"]
         .as_array()
         .and_then(|list| list.first())
-        .and_then(|first| first["symbols_added"].as_u64())
+        .and_then(|first| first["symbols_written"].as_u64())
         .unwrap_or(0);
     let files = value["branches"].as_array().map_or(0, |list| list.len());
     Ok(tool_success(
@@ -491,60 +416,22 @@ fn tool_sync(context: &Context, arguments: &Value) -> Result<Value> {
         value,
     ))
 }
-fn neighborhood_json(neighborhood: &cigar_core::domain::GraphNeighborhood) -> Value {
-    let list = |items: &[cigar_core::domain::RelatedOccurrence]| {
-        items
-            .iter()
-            .map(|item| {
-                serde_json::json!({
-                    "file": item.occurrence.file_path.to_string(),
-                    "start_line": item.occurrence.start_line,
-                    "symbol_hash": item.occurrence.symbol_hash.to_string(),
-                    "relation": item.relation.to_string(),
-                    "depth": item.depth,
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    serde_json::json!({
-        "callers": list(&neighborhood.callers),
-        "callees": list(&neighborhood.callees),
-        "types_used": list(&neighborhood.types_used),
-        "implements": list(&neighborhood.implements),
-        "implemented_by": list(&neighborhood.implemented_by),
-        "truncated": neighborhood.truncated,
-    })
-}
-
-fn open_store(context: &Context) -> Result<cigar_storage::SqliteStore> {
+fn open_store(context: &Context) -> Result<cigar_storage::TargetStore> {
     context.require_initialized()?;
-    Ok(
-        cigar_storage::open_store(&context.store_path(), context.config.embedding.dimensions)?
-            .with_search_config(&context.config.search),
-    )
+    cigar_storage::TargetStore::open(&context.store_path(), false)
 }
 
-fn resolve_branch_arg(
-    context: &Context,
-    store: &dyn ContextStore,
-    arguments: &Value,
-) -> Result<BranchName> {
-    match arguments.get("branch").and_then(Value::as_str) {
-        Some(name) => {
-            let branch = BranchName::parse(name.to_owned())?;
-            if store
-                .get_branch_state(&context.namespace, &branch)?
-                .is_none()
-            {
-                return Err(EngineError::NotFound {
-                    entity: "branch".into(),
-                    id: format!("BRANCH_NOT_FOUND: {branch}"),
-                });
-            }
-            Ok(branch)
+fn validate_branch(context: &Context, arguments: &Value) -> Result<()> {
+    let current = context.resolve_branch()?;
+    if let Some(name) = arguments.get("branch").and_then(Value::as_str) {
+        let requested = BranchName::parse(name.to_owned())?;
+        if requested != current {
+            return Err(EngineError::invalid(
+                "indeks lexical hanya mendukung branch checkout saat ini",
+            ));
         }
-        None => resolve_indexed_branch(context, store),
     }
+    Ok(())
 }
 
 fn clamp_usize(arguments: &Value, key: &str, default: usize, min: usize, max: usize) -> usize {

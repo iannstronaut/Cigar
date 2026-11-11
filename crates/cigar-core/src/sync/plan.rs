@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Plan building: turn a delta into the content and branch batches.
 //!
 //! This is the pure step between parsing and writing: it decides which shared

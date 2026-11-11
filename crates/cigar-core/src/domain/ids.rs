@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Domain newtypes.
 //!
 //! Every identifier validates at construction so that invalid values cannot

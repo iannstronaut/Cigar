@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Go parser (docs/07 sections 4.3, 8.4).
 
 use tree_sitter::{Node, Tree};

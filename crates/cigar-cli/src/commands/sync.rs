@@ -1,11 +1,13 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! `cigar sync` (docs/10 section 5).
 
-use cigar_core::domain::{BranchName, CommitId, SourceMode, SyncMode};
+use cigar_core::domain::{BranchName, CommitId, SyncMode};
 use cigar_core::error::{EngineError, Result};
 use cigar_core::git::{FsSource, GitSource};
 use cigar_core::parse::ParserRegistry;
-use cigar_core::sync::{SyncEngine, SyncOptions};
-use cigar_core::traits::{SourceProvider, SystemClock};
+use cigar_core::sync::target::sync_target;
+use cigar_core::traits::SourceProvider;
 
 use crate::cli::SyncArgs;
 use crate::commands::init::{atomic_write, refs_path};
@@ -14,81 +16,64 @@ use crate::output::Printer;
 
 /// Shared implementation used by the CLI and the MCP `cigar_sync` tool.
 ///
-/// Holds the store lock, resolves branches, runs the engine, and mirrors refs.
+/// Holds the store lock while committing one namespace snapshot.
 pub fn run_captured(context: &Context, args: &SyncArgs) -> Result<serde_json::Value> {
+    if args.all_branches {
+        return Err(EngineError::invalid(
+            "--all-branches tidak didukung oleh indeks lexical",
+        ));
+    }
     let _lock = cigar_storage::StoreLock::acquire_with_wait(
         &context.lock_path(),
         std::time::Duration::from_secs(context.wait_secs),
     )?;
-    let store = cigar_storage::open_store_for_write(
-        &context.store_path(),
-        context.config.embedding.dimensions,
-    )?
-    .with_search_config(&context.config.search);
-    let embedder = None;
-    let registry = ParserRegistry::with_defaults();
-    let clock = SystemClock;
+    run_locked(context, args)
+}
 
-    let branches = if args.all_branches {
-        list_git_branches(context)?
-    } else {
-        vec![context.resolve_branch()?]
-    };
+pub(crate) fn run_locked(context: &Context, args: &SyncArgs) -> Result<serde_json::Value> {
+    let store = cigar_storage::TargetStore::open(&context.store_path(), true)?;
+    let registry = ParserRegistry::with_defaults();
+    let source = open_source(context)?;
+    let branch = context.resolve_branch()?;
     let mode = if args.dirty {
         SyncMode::Dirty
     } else {
         SyncMode::Commit
     };
-    let options = SyncOptions {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as i64);
+    let outcome = sync_target(
+        &store,
+        source.as_ref(),
+        &registry,
+        &context.config,
+        context.namespace.as_str(),
         mode,
-        full: args.full,
-        include_untracked: !args.no_untracked,
-        strict: context.strict,
-    };
-
-    let current_branch = context.resolve_branch()?;
-    let mut payload = Vec::new();
-    for branch in &branches {
-        let source = open_source(context)?;
-        let engine = SyncEngine::new(&store, embedder, &registry, &context.config, &clock);
-        let outcome = engine.run(source.as_ref(), &context.namespace, branch, &options)?;
-        if mode == SyncMode::Commit {
-            update_refs(context, branch, outcome.head.as_ref())?;
-            if branch == &current_branch {
-                atomic_write(
-                    &context.cig_dir.join("HEAD"),
-                    outcome
-                        .head
-                        .as_ref()
-                        .map_or("", |head| head.as_str())
-                        .as_bytes(),
-                )?;
-            }
-        }
-        mirror_refs(context, branch, outcome.head.as_ref())?;
-        payload.push(serde_json::json!({
-            "branch": outcome.branch.to_string(),
-            "head": outcome.head.as_ref().map(|head| head.as_str().to_owned()),
-            "status": outcome.status.to_string(),
-            "files_added": outcome.summary.files_added,
-            "files_modified": outcome.summary.files_modified,
-            "files_deleted": outcome.summary.files_deleted,
-            "files_skipped": outcome.summary.files_skipped,
-            "symbols_added": outcome.summary.symbols_added,
-            "embeddings_computed": outcome.summary.embeddings_computed,
-            "embeddings_reused": outcome.summary.embeddings_reused,
-            "edges_inserted": outcome.summary.edges_inserted,
-            "edges_resolved": outcome.summary.edges_resolved,
-            "edges_unresolved": outcome.summary.edges_unresolved,
-            "warnings": outcome.warnings,
-        }));
+        args.full,
+        now,
+        !args.no_untracked,
+        context.strict,
+    )?;
+    if mode == SyncMode::Commit {
+        let head = outcome.head.as_deref().map(CommitId::parse).transpose()?;
+        update_refs(context, &branch, head.as_ref())?;
+        atomic_write(
+            &context.cig_dir.join("HEAD"),
+            outcome.head.as_deref().unwrap_or("").as_bytes(),
+        )?;
     }
-
     Ok(serde_json::json!({
         "schema_version": cigar_core::SCHEMA_VERSION,
         "namespace": context.namespace.to_string(),
         "mode": mode.to_string(),
-        "branches": payload,
+        "branches": [{
+            "branch": branch.to_string(),
+            "head": outcome.head,
+            "files_written": outcome.files_written,
+            "files_deleted": outcome.files_deleted,
+            "symbols_written": outcome.symbols_written,
+        }],
     }))
 }
 
@@ -105,56 +90,14 @@ pub fn run(context: &Context, args: &SyncArgs, printer: &Printer) -> Result<i32>
         return Ok(0);
     }
 
-    let branches = value["branches"].as_array().cloned().unwrap_or_default();
-    for branch in &branches {
-        let name = branch["branch"].as_str().unwrap_or("?");
-        let added = branch["files_added"].as_u64().unwrap_or(0);
-        let modified = branch["files_modified"].as_u64().unwrap_or(0);
-        let deleted = branch["files_deleted"].as_u64().unwrap_or(0);
-        let total = added + modified + deleted;
-        if branches.len() == 1 {
-            if total == 0 {
-                printer.line("Tidak ada perubahan.");
-            } else {
-                printer.line(&format!(
-                    "Sync {} - {} file (+{} ~{} -{}) - {} simbol - {} vektor baru - {} dipakai ulang",
-                    name,
-                    total,
-                    added,
-                    modified,
-                    deleted,
-                    branch["symbols_added"].as_u64().unwrap_or(0),
-                    branch["embeddings_computed"].as_u64().unwrap_or(0),
-                    branch["embeddings_reused"].as_u64().unwrap_or(0)
-                ));
-            }
-            let skipped = branch["files_skipped"].as_u64().unwrap_or(0);
-            if skipped > 0 {
-                printer.info(&format!(
-                    "{skipped} file dilewati (biner/terlalu besar/symlink)"
-                ));
-            }
-            printer.info(&format!(
-                "edge: {} ditulis - {} ter-resolve - {} belum",
-                branch["edges_inserted"].as_u64().unwrap_or(0),
-                branch["edges_resolved"].as_u64().unwrap_or(0),
-                branch["edges_unresolved"].as_u64().unwrap_or(0)
-            ));
-        } else {
-            printer.line(&format!(
-                "{}: {} file, {} simbol, {} vektor baru",
-                name,
-                total,
-                branch["symbols_added"].as_u64().unwrap_or(0),
-                branch["embeddings_computed"].as_u64().unwrap_or(0)
-            ));
-        }
-        for warning in branch["warnings"].as_array().cloned().unwrap_or_default() {
-            if let Some(text) = warning.as_str() {
-                printer.warn(text);
-            }
-        }
-    }
+    let branch = &value["branches"][0];
+    printer.line(&format!(
+        "Sync {} - {} file ditulis - {} dihapus - {} simbol",
+        branch["branch"].as_str().unwrap_or("?"),
+        branch["files_written"].as_u64().unwrap_or(0),
+        branch["files_deleted"].as_u64().unwrap_or(0),
+        branch["symbols_written"].as_u64().unwrap_or(0)
+    ));
     Ok(0)
 }
 
@@ -175,55 +118,9 @@ pub fn open_source(context: &Context) -> Result<Box<dyn SourceProvider>> {
     }
 }
 
-/// Lists branches present in the repository, for `--all-branches`.
-fn list_git_branches(context: &Context) -> Result<Vec<BranchName>> {
-    let source = open_source(context)?;
-    if source.mode() == SourceMode::FsOnly {
-        return Ok(vec![BranchName::parse("main")?]);
-    }
-    let root = context.root.clone();
-    let output = std::process::Command::new("git")
-        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"])
-        .current_dir(&root)
-        .output()
-        .map_err(|err| EngineError::io(&root, err))?;
-    if !output.status.success() {
-        return Ok(vec![context.resolve_branch()?]);
-    }
-    let mut branches = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(branch) = BranchName::parse(line.to_owned()) {
-            branches.push(branch);
-        }
-    }
-    if branches.is_empty() {
-        branches.push(context.resolve_branch()?);
-    }
-    Ok(branches)
-}
-
 /// Updates `.cig/refs/heads/<branch>` after a commit-mode sync.
 pub fn update_refs(context: &Context, branch: &BranchName, head: Option<&CommitId>) -> Result<()> {
     let path = refs_path(&context.cig_dir, branch);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| EngineError::io(parent, err))?;
-    }
-    atomic_write(
-        &path,
-        format!("{}\n", head.map_or("", |commit| commit.as_str())).as_bytes(),
-    )
-}
-
-/// Mirrors refs for non-commit modes without advancing them.
-fn mirror_refs(context: &Context, branch: &BranchName, head: Option<&CommitId>) -> Result<()> {
-    let path = refs_path(&context.cig_dir, branch);
-    if path.exists() {
-        return Ok(());
-    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| EngineError::io(parent, err))?;
     }

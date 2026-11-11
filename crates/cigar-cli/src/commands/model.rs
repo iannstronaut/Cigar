@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! `cigar model download|status` (docs/10 section 13).
 
 use cigar_core::error::Result;

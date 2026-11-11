@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Model manifests and the on-disk model cache (docs/08 sections 3, 6, 7).
 //!
 //! A manifest is compiled in so the exact revision and checksum are auditable

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Embedding backend selection and model preparation.
 
 #[cfg(feature = "semantic")]

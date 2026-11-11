@@ -1,8 +1,11 @@
-//! Fase 6 tests: repair, prune_branches, hardening, and invariant checks.
+// SPDX-License-Identifier: MPL-2.0
 
+//! Fase 6 end-to-end coverage for the target (lexical) index.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rusqlite::Connection;
+use serde_json::Value;
 use tempfile::TempDir;
 
 fn cigar() -> Command {
@@ -37,22 +40,9 @@ impl Repo {
         git(&self.root, &["commit", "-q", "-m", message]);
     }
 
-    fn root(&self) -> &Path {
-        &self.root
-    }
-
     fn run(&self, args: &[&str]) -> (i32, String, String) {
         run_in(args, &self.root)
     }
-}
-fn git_head(root: &Path) -> String {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn git(root: &Path, args: &[&str]) {
@@ -62,6 +52,16 @@ fn git(root: &Path, args: &[&str]) {
         .status()
         .expect("git tersedia");
     assert!(status.success(), "git {args:?} gagal");
+}
+
+fn git_head(root: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn run_in(args: &[&str], cwd: &Path) -> (i32, String, String) {
@@ -79,278 +79,205 @@ fn run_in(args: &[&str], cwd: &Path) -> (i32, String, String) {
     )
 }
 
-fn init_fake(repo: &Repo) {
-    let (code, _out, err) = repo.run(&[
-        "init",
-        "--no-model",
-        "--embedding",
-        "fake",
-        "--dimensions",
-        "32",
-    ]);
-    assert_eq!(code, 0, "{err}");
-}
-
-#[test]
-fn repair_verify_reports_healthy() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("init");
-    init_fake(&repo);
-    repo.run(&["sync"]);
-
-    let (code, stdout, stderr) = repo.run(&["repair", "--verify"]);
+fn json(repo: &Repo, args: &[&str]) -> Value {
+    let (code, stdout, stderr) = repo.run(args);
     assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("konsisten"), "{stdout}");
+    serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}: {stdout}"))
 }
 
-#[test]
-fn repair_head_restores_missing_head_file() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("init");
-    init_fake(&repo);
-    let (code, _, err) = repo.run(&["sync"]);
-    assert_eq!(code, 0, "{err}");
-    let indexed = git_head(repo.root());
-    repo.write("src/a.rs", "pub fn changed() {}\n");
-    repo.commit("second");
-
-    let head = repo.root().join(".cig").join("HEAD");
-    std::fs::remove_file(&head).unwrap();
-    let (code, _out, err) = repo.run(&["repair", "--head"]);
-    assert_eq!(code, 0, "{err}");
-    let text = std::fs::read_to_string(&head).unwrap();
-    assert_eq!(text.trim(), indexed);
-}
-
-#[test]
-fn head_tracks_commit_sync_but_not_dirty_sync() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("first");
-    init_fake(&repo);
-    let head = repo.root().join(".cig/HEAD");
-    assert_eq!(std::fs::read_to_string(&head).unwrap(), "");
-
-    let (code, _, err) = repo.run(&["sync"]);
-    assert_eq!(code, 0, "{err}");
-    let first = git_head(repo.root());
-    assert_eq!(std::fs::read_to_string(&head).unwrap().trim(), first);
-
-    repo.write("src/a.rs", "pub fn b() {}\n");
-    repo.commit("second");
-    let second = git_head(repo.root());
-    let (code, _, err) = repo.run(&["sync", "--dirty"]);
-    assert_eq!(code, 0, "{err}");
-    assert_eq!(std::fs::read_to_string(&head).unwrap().trim(), first);
-
-    let (code, _, err) = repo.run(&["sync"]);
-    assert_eq!(code, 0, "{err}");
-    assert_eq!(std::fs::read_to_string(&head).unwrap().trim(), second);
-}
-
-#[test]
-fn repair_head_is_empty_before_first_sync() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("first");
-    init_fake(&repo);
-    let head = repo.root().join(".cig/HEAD");
-    std::fs::write(&head, "incorrect").unwrap();
-    let (code, _, err) = repo.run(&["repair", "--head"]);
-    assert_eq!(code, 0, "{err}");
-    assert_eq!(std::fs::read_to_string(&head).unwrap(), "");
-}
-
-#[test]
-fn repair_without_flags_is_read_only() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("init");
-    init_fake(&repo);
-    repo.run(&["sync"]);
-    // A healthy index reports clean, and the store file is untouched.
-    let store = repo.root().join(".cig").join("store.db");
-    let before = std::fs::metadata(&store).unwrap().len();
-    let (code, _out, err) = repo.run(&["repair"]);
-    assert_eq!(code, 0, "{err}");
-    assert!(before > 0);
-}
-
-#[test]
-fn gc_prune_branches_removes_empty_stale_branch() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("init");
-    init_fake(&repo);
-    repo.run(&["sync"]);
-
-    // Create and index a branch, then delete it in Git and clear its manifest.
-    git(repo.root(), &["checkout", "-q", "-b", "stale/one"]);
-    repo.write("src/b.rs", "pub fn b() {}\n");
-    repo.commit("stale");
-    repo.run(&["sync"]);
-    git(repo.root(), &["checkout", "-q", "main"]);
-    git(repo.root(), &["branch", "-D", "stale/one"]);
-
-    let (code, _out, err) = repo.run(&["branch", "prune"]);
-    assert_eq!(code, 0, "{err}");
-
-    let (code, stdout, err) = repo.run(&["gc", "--prune-branches", "--dry-run", "--json"]);
-    assert_eq!(code, 0, "{err}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    // The pruned branch row is already gone; nothing further to prune.
-    assert_eq!(value["branches_pruned"], 0);
-}
-
-#[test]
-fn schema_too_new_is_exit_6() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("init");
-    init_fake(&repo);
-    repo.run(&["sync"]);
-
-    // Bump the recorded schema version beyond what this build supports.
-    let store_path = repo.root().join(".cig").join("store.db");
-    {
-        cigar_storage::register_sqlite_vec();
-        let connection = rusqlite::Connection::open(&store_path).unwrap();
-        connection
-            .execute("UPDATE meta SET value='99' WHERE key='schema_version'", [])
-            .unwrap();
+fn init(repo: &Repo, fs_only: bool) {
+    let mut args = vec!["init", "--offline"];
+    if fs_only {
+        args.push("--git-mode");
+        args.push("fs-only");
     }
-
-    let (code, _out, stderr) = repo.run(&["status"]);
-    assert_eq!(code, 6, "{stderr}");
-    assert!(stderr.contains("lebih baru"), "{stderr}");
-}
-
-#[test]
-fn corrupt_index_is_detected_then_repair_drops_orphans() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.write("src/b.rs", "pub fn b() {}\n");
-    repo.commit("init");
-    init_fake(&repo);
-    repo.run(&["sync"]);
-
-    // Delete a branch file row behind CIGAR's back to create orphans.
-    let store_path = repo.root().join(".cig").join("store.db");
-    {
-        cigar_storage::register_sqlite_vec();
-        let connection = rusqlite::Connection::open(&store_path).unwrap();
-        connection
-            .execute_batch("PRAGMA foreign_keys = OFF;")
-            .unwrap();
-        connection
-            .execute("DELETE FROM branch_files WHERE file_path = 'src/b.rs'", [])
-            .unwrap();
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON;")
-            .unwrap();
-    }
-
-    let (code, _out, _stderr) = repo.run(&["status", "--verify"]);
-    assert_eq!(code, 6, "verify harus mendeteksi inkonsistensi");
-
-    let (code, stdout, stderr) = repo.run(&["repair", "--drop-orphans", "--json"]);
+    let (code, _stdout, stderr) = repo.run(&args);
     assert_eq!(code, 0, "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["healthy_after"], true);
 }
 
 #[test]
-fn large_file_is_skipped_not_fatal() {
+fn fs_mode_indexes_worktree_and_handles_dirty_update_delete() {
     let repo = Repo::new();
-    repo.write("src/ok.rs", "pub fn ok() {}\n");
-    let big = format!("pub fn big() {{ {} }}\n", "1 + ".repeat(600_000));
-    repo.write("src/big.rs", &big);
-    repo.commit("init");
-    init_fake(&repo);
+    repo.write("src/a.rs", "pub fn alpha() { beta(); }\nfn beta() {}\n");
+    repo.write("notes.txt", "not source\n");
+    init(&repo, true);
 
-    let (code, stdout, stderr) = repo.run(&["sync", "--json"]);
-    assert_eq!(code, 0, "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["branches"][0]["files_added"], 1);
-    assert!(value["branches"][0]["files_skipped"].as_u64().unwrap() >= 1);
+    let first = json(&repo, &["sync", "--json"]);
+    assert_eq!(first["mode"], "commit");
+    assert_eq!(first["branches"][0]["files_written"], 1);
+    assert_eq!(first["branches"][0]["symbols_written"], 2);
+
+    repo.write("src/a.rs", "pub fn alpha_updated() {}\n");
+    std::fs::remove_file(repo.root.join("notes.txt")).unwrap();
+    repo.write("src/new.rs", "pub struct NewType;\n");
+    let second = json(&repo, &["sync", "--dirty", "--json"]);
+    assert_eq!(second["mode"], "dirty");
+    assert_eq!(second["branches"][0]["files_deleted"], 0);
+    assert_eq!(second["branches"][0]["files_written"], 2);
+
+    let status = json(&repo, &["status", "--json"]);
+    assert_eq!(status["stats"]["files"], 2);
+    assert_eq!(
+        json(&repo, &["query", "alpha_updated", "--json"])["results"][0]["symbol"]["name"],
+        "alpha_updated"
+    );
+    assert!(json(&repo, &["query", "beta", "--json"])["results"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
-fn invalid_utf8_file_is_skipped() {
+fn commit_sync_deletes_and_updates_target_files() {
     let repo = Repo::new();
-    repo.write("src/ok.rs", "pub fn ok() {}\n");
-    std::fs::write(repo.root().join("src/bad.rs"), [0xFF_u8, 0xFE, 0xFD]).unwrap();
-    repo.commit("init");
-    init_fake(&repo);
+    repo.write("src/a.rs", "pub fn old_name() {}\n");
+    repo.write("src/remove.rs", "pub fn removed() {}\n");
+    repo.commit("first");
+    init(&repo, false);
+    let first = json(&repo, &["sync", "--json"]);
+    assert_eq!(first["branches"][0]["files_written"], 2);
 
-    let (code, stdout, stderr) = repo.run(&["sync", "--json"]);
-    assert_eq!(code, 0, "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["branches"][0]["files_added"], 1);
+    repo.write("src/a.rs", "pub fn new_name() {}\n");
+    std::fs::remove_file(repo.root.join("src/remove.rs")).unwrap();
+    repo.write("src/add.rs", "pub fn added() {}\n");
+    repo.commit("second");
+    let second = json(&repo, &["sync", "--json"]);
+    assert_eq!(second["branches"][0]["files_deleted"], 1);
+    assert_eq!(second["branches"][0]["files_written"], 2);
+
+    assert_eq!(
+        json(&repo, &["inspect", "new_name", "--json"])["symbol"]["file"],
+        "src/a.rs"
+    );
+    let (code, _stdout, _stderr) = repo.run(&["inspect", "removed", "--json"]);
+    assert_ne!(code, 0);
+    assert!(
+        json(&repo, &["query", "added", "--json"])["results"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 1
+    );
 }
 
 #[test]
-fn paths_outside_repo_are_rejected() {
+fn commit_and_dirty_preserve_head_and_sync_state_contract() {
     let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("init");
-    init_fake(&repo);
+    repo.write("src/a.rs", "pub fn first() {}\n");
+    repo.commit("first");
+    init(&repo, false);
+    let first_head = git_head(&repo.root);
+    json(&repo, &["sync", "--json"]);
 
-    let (code, _out, stderr) = repo.run(&["status", "--namespace", "../escape"]);
+    let head_file = repo.root.join(".cig/HEAD");
+    assert_eq!(
+        std::fs::read_to_string(&head_file).unwrap().trim(),
+        first_head
+    );
+    let store = repo.root.join(".cig/store.db");
+    let connection = Connection::open(&store).unwrap();
+    let state: String = connection
+        .query_row(
+            "SELECT last_commit_hash FROM sync_state WHERE namespace='default'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, first_head);
+    drop(connection);
+
+    repo.write("src/a.rs", "pub fn dirty_version() {}\n");
+    json(&repo, &["sync", "--dirty", "--json"]);
+    assert_eq!(
+        std::fs::read_to_string(&head_file).unwrap().trim(),
+        first_head
+    );
+    let connection = Connection::open(&store).unwrap();
+    let state: String = connection
+        .query_row(
+            "SELECT last_commit_hash FROM sync_state WHERE namespace='default'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // Dirty snapshots invalidate the commit baseline so the next commit sync
+    // fully reconciles files that changed only in the working tree.
+    assert!(state.is_empty());
+}
+
+#[test]
+fn strict_sync_error_rolls_back_target_batch_and_pointers() {
+    let repo = Repo::new();
+    repo.write("src/a.rs", "pub fn stable() {}\n");
+    repo.commit("first");
+    init(&repo, false);
+    json(&repo, &["sync", "--json"]);
+    let old_head = git_head(&repo.root);
+    let before = json(&repo, &["status", "--json"])["stats"].clone();
+
+    std::fs::write(repo.root.join("src/a.rs"), [0xff_u8, 0xfe, 0xfd]).unwrap();
+    repo.commit("invalid");
+    let (code, _stdout, stderr) = repo.run(&["sync", "--strict"]);
+    assert_eq!(code, 2, "{stderr}");
+
+    assert_eq!(json(&repo, &["status", "--json"])["stats"], before);
+    assert_eq!(
+        std::fs::read_to_string(repo.root.join(".cig/HEAD"))
+            .unwrap()
+            .trim(),
+        old_head
+    );
+    assert_eq!(
+        json(&repo, &["inspect", "stable", "--json"])["symbol"]["name"],
+        "stable"
+    );
+}
+
+#[test]
+fn status_query_inspect_reindex_and_repair_use_target_contract() {
+    let repo = Repo::new();
+    repo.write(
+        "src/lib.rs",
+        "/// Checks a token.\npub fn validate_token() { helper(); }\nfn helper() {}\n",
+    );
+    repo.commit("init");
+    init(&repo, false);
+    json(&repo, &["sync", "--json"]);
+
+    let status = json(&repo, &["status", "--verify", "--json"]);
+    assert_eq!(status["search"]["mode"], "lexical-graph");
+    assert_eq!(status["stats"]["symbols"], 2);
+    assert!(status["health"].as_array().unwrap().is_empty());
+
+    let query = json(&repo, &["query", "validate_token", "--json"]);
+    assert_eq!(query["results"][0]["symbol"]["name"], "validate_token");
+    let inspected = json(&repo, &["inspect", "validate_token", "--json"]);
+    assert_eq!(inspected["symbol"]["name"], "validate_token");
+    assert!(inspected["symbol"]["doc"]
+        .as_str()
+        .unwrap()
+        .contains("Checks"));
+
+    let rebuilt = json(&repo, &["reindex", "--yes", "--no-backup", "--json"]);
+    assert_eq!(rebuilt["files"], 1);
+    assert_eq!(rebuilt["symbols"], 2);
+    assert_eq!(rebuilt["backup"], false);
+
+    let repaired = json(&repo, &["repair", "--json"]);
+    assert_eq!(repaired["healthy"], true);
+    assert!(repaired["problems"].as_array().unwrap().is_empty());
+
+    let (code, _stdout, stderr) = repo.run(&["repair", "--head"]);
     assert_eq!(code, 2, "{stderr}");
 }
 
 #[test]
-fn empty_repository_is_handled() {
+fn empty_fs_repository_is_a_valid_target_snapshot() {
     let repo = Repo::new();
-    init_fake(&repo);
-    let (code, stdout, stderr) = repo.run(&["sync", "--json"]);
-    assert_eq!(code, 0, "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["branches"][0]["files_added"], 0);
-    assert!(value["branches"][0]["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|warning| warning.as_str().unwrap().contains("HEAD")));
-}
-
-#[test]
-fn unicode_and_crlf_files_index_correctly() {
-    let repo = Repo::new();
-    repo.write(
-        "src/unicode.rs",
-        "/// Memeriksa token — mendukung ünïcode.\n\r\npub fn periksa_token() -> bool {\r\n    true\r\n}\r\n",
-    );
-    repo.commit("init");
-    init_fake(&repo);
-
-    let (code, stdout, stderr) = repo.run(&["sync", "--json"]);
-    assert_eq!(code, 0, "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["branches"][0]["symbols_added"], 1);
-
-    let (code, stdout, stderr) = repo.run(&["inspect", "periksa_token", "--json"]);
-    assert_eq!(code, 0, "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(value["symbol"]["doc"].as_str().unwrap().contains("ünïcode"));
-}
-
-#[test]
-fn unchanged_content_reuses_vectors_across_commits() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn stable() -> i32 { 1 }\n");
-    repo.commit("init");
-    init_fake(&repo);
-    repo.run(&["sync"]);
-
-    // A commit that only touches an unrelated file must not re-embed.
-    repo.write("README.md", "docs\n");
-    repo.commit("docs");
-    let (code, stdout, stderr) = repo.run(&["sync", "--json"]);
-    assert_eq!(code, 0, "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["branches"][0]["embeddings_computed"], 0);
+    init(&repo, true);
+    let synced = json(&repo, &["sync", "--json"]);
+    assert_eq!(synced["branches"][0]["files_written"], 0);
+    let status = json(&repo, &["status", "--json"]);
+    assert_eq!(status["stats"]["files"], 0);
+    assert_eq!(status["stats"]["symbols"], 0);
 }

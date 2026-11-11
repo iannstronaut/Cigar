@@ -1,4 +1,6 @@
-﻿//! Fase 3 CLI tests: reindex, model status, config drift, Go/Python sync.
+// SPDX-License-Identifier: MPL-2.0
+
+//! Fase 3 CLI tests: reindex, model status, config drift, Go/Python sync.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -159,26 +161,7 @@ fn go_and_python_files_are_indexed() {
     assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let branch = &value["branches"][0];
-    assert_eq!(branch["files_added"], 2);
+    assert_eq!(branch["files_written"], 2);
     // Go: Authenticate + validate; Python: Repo, Repo::save, authenticate.
-    assert_eq!(branch["symbols_added"], 5);
-}
-
-#[test]
-fn dimension_mismatch_is_exit_6() {
-    let repo = Repo::new();
-    repo.write("src/a.rs", "pub fn a() {}\n");
-    repo.commit("init");
-    init_fake(&repo);
-    run(&["sync"], repo.root());
-
-    // Corrupt the configured dimension while the store holds 32.
-    let config = repo.root().join(".cig").join("config.toml");
-    let text = std::fs::read_to_string(&config).unwrap();
-    let patched = text.replace("dimensions = 32", "dimensions = 64");
-    std::fs::write(&config, patched).unwrap();
-
-    let (code, _out, stderr) = run(&["status"], repo.root());
-    assert_eq!(code, 6, "{stderr}");
-    assert!(stderr.contains("tidak cocok"), "{stderr}");
+    assert_eq!(branch["symbols_written"], 5);
 }

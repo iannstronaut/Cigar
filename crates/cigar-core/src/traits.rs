@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Ports implemented by adapters (docs/06, docs/21 ?8.3).
 //!
 //! Every trait is object-safe and blocking. Core never knows about SQLite,
@@ -65,6 +67,17 @@ pub trait Embedder: Send + Sync {
         let key = template.key(template_version);
         (template, key)
     }
+}
+
+/// Namespace storage required by the lexical sync pipeline.
+pub trait TargetStorePort: Send + Sync {
+    fn sync_head(&self, namespace: &str) -> Result<Option<String>>;
+    fn files(&self, namespace: &str) -> Result<Vec<crate::domain::TargetFileState>>;
+    /// Returns the tokenizer setting recorded for this namespace, if known.
+    fn split_identifiers(&self, _namespace: &str) -> Result<Option<bool>> {
+        Ok(None)
+    }
+    fn apply_batch(&self, batch: &crate::domain::TargetBatch) -> Result<()>;
 }
 
 /// Persistent store.

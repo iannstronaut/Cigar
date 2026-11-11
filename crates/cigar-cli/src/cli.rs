@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Argument parsing. Clap lives only in this crate.
 
 use std::path::PathBuf;
@@ -10,7 +12,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
     name = "cigar",
     version,
     about = "Code-Indexed Graph Augmented Retrieval",
-    long_about = "CIGAR builds a local, branch-aware semantic index of a repository and \
+    long_about = "CIGAR builds a local, branch-aware index of a repository and \
                   serves compact, relevant context to coding agents.",
     disable_help_subcommand = true
 )]
@@ -81,7 +83,7 @@ pub struct GlobalArgs {
 /// Subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Initialize the state directory, schema, and model.
+    /// Initialize the state directory and schema.
     Init(InitArgs),
     /// Incrementally index the repository.
     Sync(SyncArgs),
@@ -145,7 +147,7 @@ pub struct SyncArgs {
     /// Index the working tree without advancing HEAD.
     #[arg(long)]
     pub dirty: bool,
-    /// Read every file, reusing vectors by key.
+    /// Read every file, even when unchanged.
     #[arg(long)]
     pub full: bool,
     /// Skip untracked files in dirty mode.
@@ -192,7 +194,7 @@ pub struct QueryArgs {
     /// Restrict to symbol kinds.
     #[arg(long, value_name = "KINDS")]
     pub kind: Option<String>,
-    /// Minimum cosine similarity.
+    /// Minimum lexical ranking score.
     #[arg(long, value_name = "F")]
     pub min_score: Option<f32>,
 }

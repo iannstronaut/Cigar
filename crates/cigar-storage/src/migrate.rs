@@ -74,7 +74,7 @@ pub fn is_schema_v1(path: &Path) -> Result<bool> {
 pub fn require_reindex_for_v1(path: &Path) -> Result<()> {
     if is_schema_v1(path)? {
         return Err(EngineError::storage(format!(
-            "{} menggunakan schema v1; jalankan `cigar reindex` untuk membangun ulang store v2",
+            "{} menggunakan schema v1; hentikan proses cigar, pindahkan seluruh direktori .cig dan database atau konfigurasi di luar .cig jika ada ke lokasi cadangan yang belum ada; jalankan `cigar init` dengan konfigurasi yang sesuai lalu `cigar sync`; simpan cadangan sampai data yang diperlukan dipulihkan",
             path.display()
         )));
     }

@@ -187,12 +187,20 @@ fn round3(value: f32) -> f64 {
 /// Runs the full query pipeline.
 pub struct QueryEngine<'a> {
     store: &'a dyn ContextStore,
-    embedder: &'a dyn Embedder,
+    embedder: Option<&'a dyn Embedder>,
 }
 
 impl<'a> QueryEngine<'a> {
-    pub fn new(store: &'a dyn ContextStore, embedder: &'a dyn Embedder) -> Self {
+    /// Creates a query engine using an optional semantic backend. When absent,
+    /// queries are served entirely by the deterministic lexical graph index.
+    pub fn new(store: &'a dyn ContextStore, embedder: Option<&'a dyn Embedder>) -> Self {
         Self { store, embedder }
+    }
+
+    /// Backwards-compatible constructor for callers that explicitly select a
+    /// semantic embedder.
+    pub fn with_embedder(store: &'a dyn ContextStore, embedder: &'a dyn Embedder) -> Self {
+        Self::new(store, Some(embedder))
     }
 
     /// Executes a query against one branch.
@@ -215,19 +223,21 @@ impl<'a> QueryEngine<'a> {
             return Err(EngineError::invalid("top_k harus >= 1"));
         }
 
-        let vector = self.embedder.embed_query(&query)?;
-        if vector.len() != self.embedder.dimensions() {
-            return Err(EngineError::DimensionMismatch {
-                expected: self.embedder.dimensions(),
-                actual: vector.len(),
-            });
-        }
-
         let mut warnings = Vec::new();
         let filter = Filter::new(&options.path_globs, &options.kinds)?;
 
-        let mut matches =
-            self.retrieve(namespace, branch, &vector, options, &filter, &mut warnings)?;
+        let mut matches = if let Some(embedder) = self.embedder {
+            let vector = embedder.embed_query(&query)?;
+            if vector.len() != embedder.dimensions() {
+                return Err(EngineError::DimensionMismatch {
+                    expected: embedder.dimensions(),
+                    actual: vector.len(),
+                });
+            }
+            self.retrieve(namespace, branch, &vector, options, &filter, &mut warnings)?
+        } else {
+            self.retrieve_lexical(namespace, branch, &query, options, &filter, &mut warnings)?
+        };
         if matches.len() < options.top_k && filter.is_active() {
             warnings.push("few_results".into());
         }
@@ -401,6 +411,69 @@ impl<'a> QueryEngine<'a> {
         Ok(accepted)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn retrieve_lexical(
+        &self,
+        namespace: &crate::domain::Namespace,
+        branch: &crate::domain::BranchName,
+        query: &str,
+        options: &QueryOptions,
+        filter: &Filter,
+        warnings: &mut Vec<String>,
+    ) -> Result<Vec<ScoredOccurrence>> {
+        let hits = self.store.search_lexical(
+            namespace,
+            branch,
+            query,
+            (options.top_k * 8).clamp(64, 500),
+        )?;
+        let mut accepted = Vec::with_capacity(options.top_k);
+        let mut seen = BTreeSet::new();
+        for mut hit in hits {
+            if !hit.score.is_finite() || !hit.distance.is_finite() {
+                warnings.push("dropped_non_finite_score".into());
+                continue;
+            }
+            if let Some(min_score) = options.min_score {
+                if hit.score < min_score {
+                    continue;
+                }
+            }
+            if !filter.accepts_path(&hit) {
+                continue;
+            }
+            let Some(occurrence) = self.store.get_occurrence(
+                namespace,
+                &OccurrenceRef {
+                    branch: branch.clone(),
+                    file_path: hit.file_path.clone(),
+                    symbol_hash: hit.symbol_hash.clone(),
+                    start_line: hit.start_line,
+                },
+            )?
+            else {
+                warnings.push("dropped_ghost_occurrence".into());
+                continue;
+            };
+            if !filter.accepts_kind(occurrence.symbol.kind) {
+                continue;
+            }
+            let key = (
+                hit.file_path.to_string(),
+                hit.symbol_hash.to_string(),
+                hit.start_line,
+            );
+            if seen.insert(key) {
+                hit.pending_code = occurrence.symbol.code_snippet;
+                accepted.push(hit);
+            }
+            if accepted.len() >= options.top_k {
+                break;
+            }
+        }
+        Ok(accepted)
+    }
+
     fn imports_for(
         &self,
         namespace: &crate::domain::Namespace,
@@ -566,12 +639,15 @@ struct Packed {
 fn pack_budget(
     results: Vec<QueryResult>,
     max_tokens: usize,
-    embedder: &dyn Embedder,
+    embedder: Option<&dyn Embedder>,
     index: &IndexInfo,
     query: &str,
 ) -> Packed {
+    let count = |text: &str| {
+        embedder.map_or_else(|| text.split_whitespace().count(), |e| e.count_tokens(text))
+    };
     let header = render_header(query, index, 0, max_tokens);
-    let header_tokens = embedder.count_tokens(&header);
+    let header_tokens = count(&header);
     let remaining = max_tokens.saturating_sub(header_tokens);
     let primary_budget = remaining * 70 / 100;
     let relation_budget = remaining * 20 / 100;
@@ -581,8 +657,8 @@ fn pack_budget(
     let mut truncated = false;
 
     for mut result in results {
-        let relation_cost = embedder.count_tokens(&render_relations(&result.relations, embedder));
-        let full_cost = embedder.count_tokens(&render_result(&result));
+        let relation_cost = count(&render_relations_plain(&result.relations));
+        let full_cost = count(&render_result(&result));
 
         if packed.is_empty() {
             // The top result always appears, truncated if necessary.
@@ -598,12 +674,12 @@ fn pack_budget(
             {
                 budget_for_relations = budget_for_relations.saturating_sub(8);
             }
-            trim_relations(&mut result.relations, budget_for_relations, embedder);
-            let mut cost = embedder.count_tokens(&render_result(&result));
+            trim_relations(&mut result.relations, budget_for_relations, &count);
+            let mut cost = count(&render_result(&result));
             if used + cost > primary_budget + relation_budget {
-                truncate_code(&mut result, primary_budget.saturating_sub(used), embedder);
+                truncate_code(&mut result, primary_budget.saturating_sub(used), &count);
                 result.code_truncated = true;
-                cost = embedder.count_tokens(&render_result(&result));
+                cost = count(&render_result(&result));
             }
             if used + cost > primary_budget + relation_budget && !packed.is_empty() {
                 truncated = true;
@@ -629,9 +705,12 @@ fn pack_budget(
     }
 }
 
-fn trim_relations(relations: &mut Relations, budget: usize, embedder: &dyn Embedder) {
+fn trim_relations<F>(relations: &mut Relations, budget: usize, count: &F)
+where
+    F: Fn(&str) -> usize,
+{
     loop {
-        let cost = embedder.count_tokens(&render_relations(relations, embedder));
+        let cost = count(&render_relations_plain(relations));
         if cost <= budget {
             return;
         }
@@ -652,9 +731,12 @@ fn trim_relations(relations: &mut Relations, budget: usize, embedder: &dyn Embed
     }
 }
 
-fn truncate_code(result: &mut QueryResult, budget: usize, embedder: &dyn Embedder) {
+fn truncate_code<F>(result: &mut QueryResult, budget: usize, count: &F)
+where
+    F: Fn(&str) -> usize,
+{
     let mut lines: Vec<&str> = result.code.lines().collect();
-    while !lines.is_empty() && embedder.count_tokens(&lines.join("\n")) > budget {
+    while !lines.is_empty() && count(&lines.join("\n")) > budget {
         lines.pop();
     }
     let mut code = lines.join("\n");
@@ -731,10 +813,6 @@ pub fn render_result(result: &QueryResult) -> String {
     }
     out.push_str(&render_relations_plain(&result.relations));
     out
-}
-
-fn render_relations(relations: &Relations, _embedder: &dyn Embedder) -> String {
-    render_relations_plain(relations)
 }
 
 fn render_relations_plain(relations: &Relations) -> String {

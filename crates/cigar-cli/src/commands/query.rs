@@ -7,14 +7,14 @@ use cigar_core::traits::ContextStore;
 
 use crate::cli::QueryArgs;
 use crate::context::Context;
-use crate::embedding::build_embedder;
 use crate::output::Printer;
 
 /// Runs `cigar query`.
 pub fn run(context: &Context, args: &QueryArgs, printer: &Printer) -> Result<i32> {
     context.require_initialized()?;
     let store =
-        cigar_storage::open_store(&context.store_path(), context.config.embedding.dimensions)?;
+        cigar_storage::open_store(&context.store_path(), context.config.embedding.dimensions)?
+            .with_search_config(&context.config.search);
     let branch = resolve_indexed_branch(context, &store)?;
 
     let kinds = match &args.kind {
@@ -40,8 +40,7 @@ pub fn run(context: &Context, args: &QueryArgs, printer: &Printer) -> Result<i32
     };
 
     let index = index_info(context, &store, &branch)?;
-    let embedder = build_embedder(&context.config, context.offline)?;
-    let engine = QueryEngine::new(&store, embedder.as_ref());
+    let engine = QueryEngine::new(&store, None);
     let response = engine.run(&context.namespace, &branch, &args.query, &options, index)?;
 
     emit(printer, &response, options.max_tokens)
@@ -83,6 +82,16 @@ pub fn index_info(
     branch: &BranchName,
 ) -> Result<IndexInfo> {
     let state = store.get_branch_state(&context.namespace, branch)?;
+    if let Some(state) = &state {
+        let actual = context.config.fingerprint()?;
+        if state.config_fingerprint != actual {
+            return Err(EngineError::ConfigMismatch {
+                field: "config_fingerprint".into(),
+                expected: state.config_fingerprint.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+    }
     let git_head = git_head(context);
     let indexed_head = state
         .as_ref()

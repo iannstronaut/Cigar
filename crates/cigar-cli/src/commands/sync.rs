@@ -10,7 +10,6 @@ use cigar_core::traits::{SourceProvider, SystemClock};
 use crate::cli::SyncArgs;
 use crate::commands::init::{atomic_write, refs_path};
 use crate::context::Context;
-use crate::embedding::build_embedder;
 use crate::output::Printer;
 
 /// Shared implementation used by the CLI and the MCP `cigar_sync` tool.
@@ -24,8 +23,9 @@ pub fn run_captured(context: &Context, args: &SyncArgs) -> Result<serde_json::Va
     let store = cigar_storage::open_store_for_write(
         &context.store_path(),
         context.config.embedding.dimensions,
-    )?;
-    let embedder = build_embedder(&context.config, context.offline)?;
+    )?
+    .with_search_config(&context.config.search);
+    let embedder = None;
     let registry = ParserRegistry::with_defaults();
     let clock = SystemClock;
 
@@ -46,19 +46,24 @@ pub fn run_captured(context: &Context, args: &SyncArgs) -> Result<serde_json::Va
         strict: context.strict,
     };
 
+    let current_branch = context.resolve_branch()?;
     let mut payload = Vec::new();
     for branch in &branches {
         let source = open_source(context)?;
-        let engine = SyncEngine::new(
-            &store,
-            embedder.as_ref(),
-            &registry,
-            &context.config,
-            &clock,
-        );
+        let engine = SyncEngine::new(&store, embedder, &registry, &context.config, &clock);
         let outcome = engine.run(source.as_ref(), &context.namespace, branch, &options)?;
         if mode == SyncMode::Commit {
             update_refs(context, branch, outcome.head.as_ref())?;
+            if branch == &current_branch {
+                atomic_write(
+                    &context.cig_dir.join("HEAD"),
+                    outcome
+                        .head
+                        .as_ref()
+                        .map_or("", |head| head.as_str())
+                        .as_bytes(),
+                )?;
+            }
         }
         mirror_refs(context, branch, outcome.head.as_ref())?;
         payload.push(serde_json::json!({

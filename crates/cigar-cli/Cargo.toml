@@ -10,6 +10,14 @@ repository.workspace = true
 name = "cigar"
 path = "src/main.rs"
 
+[features]
+default = []
+semantic = ["cigar-embed/semantic"]
+
+[[test]]
+name = "query_real_model"
+required-features = ["semantic"]
+
 [dependencies]
 cigar-core = { path = "../cigar-core" }
 cigar-embed = { path = "../cigar-embed" }

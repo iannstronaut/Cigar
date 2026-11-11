@@ -45,6 +45,15 @@ impl Repo {
         run_in(args, &self.root)
     }
 }
+fn git_head(root: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
 
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -101,14 +110,57 @@ fn repair_head_restores_missing_head_file() {
     repo.write("src/a.rs", "pub fn a() {}\n");
     repo.commit("init");
     init_fake(&repo);
-    repo.run(&["sync"]);
+    let (code, _, err) = repo.run(&["sync"]);
+    assert_eq!(code, 0, "{err}");
+    let indexed = git_head(repo.root());
+    repo.write("src/a.rs", "pub fn changed() {}\n");
+    repo.commit("second");
 
     let head = repo.root().join(".cig").join("HEAD");
     std::fs::remove_file(&head).unwrap();
     let (code, _out, err) = repo.run(&["repair", "--head"]);
     assert_eq!(code, 0, "{err}");
     let text = std::fs::read_to_string(&head).unwrap();
-    assert_eq!(text.trim(), "ref: refs/heads/main");
+    assert_eq!(text.trim(), indexed);
+}
+
+#[test]
+fn head_tracks_commit_sync_but_not_dirty_sync() {
+    let repo = Repo::new();
+    repo.write("src/a.rs", "pub fn a() {}\n");
+    repo.commit("first");
+    init_fake(&repo);
+    let head = repo.root().join(".cig/HEAD");
+    assert_eq!(std::fs::read_to_string(&head).unwrap(), "");
+
+    let (code, _, err) = repo.run(&["sync"]);
+    assert_eq!(code, 0, "{err}");
+    let first = git_head(repo.root());
+    assert_eq!(std::fs::read_to_string(&head).unwrap().trim(), first);
+
+    repo.write("src/a.rs", "pub fn b() {}\n");
+    repo.commit("second");
+    let second = git_head(repo.root());
+    let (code, _, err) = repo.run(&["sync", "--dirty"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(std::fs::read_to_string(&head).unwrap().trim(), first);
+
+    let (code, _, err) = repo.run(&["sync"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(std::fs::read_to_string(&head).unwrap().trim(), second);
+}
+
+#[test]
+fn repair_head_is_empty_before_first_sync() {
+    let repo = Repo::new();
+    repo.write("src/a.rs", "pub fn a() {}\n");
+    repo.commit("first");
+    init_fake(&repo);
+    let head = repo.root().join(".cig/HEAD");
+    std::fs::write(&head, "incorrect").unwrap();
+    let (code, _, err) = repo.run(&["repair", "--head"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(std::fs::read_to_string(&head).unwrap(), "");
 }
 
 #[test]

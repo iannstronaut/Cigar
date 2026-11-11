@@ -1,102 +1,86 @@
 # CIGAR
 
-**C**ode-**I**ndexed **G**raph **A**ugmented **R**etrieval. A local, branch-aware
-semantic index of a repository, serving compact and relevant code context to
-coding agents over a CLI and an MCP server.
+CIGAR is a local code-indexing engine and CLI for supplying compact repository
+context to developers and coding agents. It indexes code structure and serves
+queries through a command line and an MCP server over stdio.
 
-CIGAR is deliberately small: one SQLite file, one local embedding model, no
-server to run. Everything stays on the machine.
+## Design target and implementation status
 
-## Install
+The authoritative design is [docs.md](docs.md), version `0.2.0-engine`;
+[docs/](docs/README.md) expands on that design. These documents describe the
+**target**, not necessarily the behavior of the current code. The workspace is
+currently version `0.1.0` and uses lexical search by default.
+
+| Area | Target design | Current implementation |
+|---|---|---|
+| Default retrieval | SQLite FTS5 weighted BM25, identifier splitting, graph centrality, and one-hop context | FTS5 lexical ranking with graph centrality and one-hop context |
+| Models | No model or heavy AI runtime for default init, sync, or query | Default CLI does not load a model; ONNX dependencies are behind the `semantic` feature |
+| Storage | SQLite files, symbols, graph edges, and FTS5 index | Content-addressed SQLite schema with branch manifests, FTS5 and sqlite-vec |
+| Repository state | Git object and working-tree indexing, including bare and filesystem-only modes | Existing CLI includes branch-aware sync, dirty sync and multiple Git modes; consult command help for supported options and limitations |
+| Performance | The specification proposes fast local retrieval | No latency or build-size target is claimed as measured here |
+
+The target is daemonless and library-first: `cigar-core` provides engine
+contracts, storage supplies SQLite, and the CLI is a thin interface. A calling
+agent is expected to translate intent into technical search terms. Optional
+semantic extensions are not intended to be prerequisites for lexical search.
+The current storage schema still differs from the target. Identifier splitting
+and BM25 weights are configurable under `[search]`; changing splitting requires
+reindexing.
+
+## Build and current quick start
+
+Build the current workspace with Rust 1.90 or newer:
 
 ```bash
 cargo build --release -p cigar-cli
 ```
 
-The binary is `target/release/cigar` (`cigar.exe` on Windows).
-
-For real embeddings you also need the ONNX Runtime shared library next to the
-binary (or `ORT_DYLIB_PATH` pointing at it):
-
-- Windows: `onnxruntime.dll` (v1.31.0 CPU, from the Microsoft ONNX Runtime release)
-- Linux: `libonnxruntime.so`
-- macOS: `libonnxruntime.dylib`
-
-The fake embedding backend (`--embedding fake`) needs neither the model nor the
-runtime and is intended for tests and offline experiments.
-
-## Quick start
+The binary is `target/release/cigar` (`cigar.exe` on Windows). The default
+indexing and query paths require no model download or ONNX Runtime.
 
 ```bash
-cigar init                 # create .cig/, config, schema, model manifest
-cigar model download       # fetch + checksum-verify the embedding model
-cigar sync                 # index HEAD of the current branch
+cigar init                 # create .cig/, configuration and index metadata
+cigar sync                 # index the current branch
 cigar query "jwt expiry validation"
 cigar inspect AuthMiddleware::authenticate
 cigar status --verify
 ```
 
-Switch branches freely: `sync` and `query` follow the Git HEAD automatically.
-Each branch keeps its own manifest, while files and symbols shared by branches
-are stored once.
+The optional `semantic` build feature enables model-management dependencies;
+the current CLI query and sync paths remain lexical.
 
-## How it works
-
-1. **Delta.** Commit mode diffs the last indexed commit against HEAD with `gix`.
-   Dirty mode (`cigar sync --dirty`) hashes the working tree instead, ignoring
-   mtimes, and never advances the stored commit.
-2. **Parse.** tree-sitter extracts functions, methods, types, imports, and edges
-   for Rust, TypeScript/TSX, JavaScript, Go, and Python.
-3. **Identify.** Content is hashed with domain-separated BLAKE3:
-   - `blob_hash` over normalized file bytes (BOM stripped, CRLF → LF),
-   - `symbol_hash` over language, kind, qualified name, signature, docstring,
-     normalized body, and a content version,
-   - `embedding_key` over the exact embedding template text and template version.
-4. **Embed.** Templates (path, imports, signature, docstring, code) are embedded
-   by a local ONNX model. Vectors are keyed by `embedding_key`, so unchanged
-   symbols are never re-embedded — across commits *and* across branches.
-5. **Query.** Cosine KNN over the vector pool, joined to the active branch
-   manifest, then one-hop graph expansion. Results are packed into a token
-   budget with a stable text format and a versioned JSON shape.
-
-## Commands
+## Current CLI
 
 | Command | Purpose |
 |---|---|
-| `cigar init` | Create `.cig`, config, schema, model metadata |
-| `cigar sync` | Incremental index of the current branch |
-| `cigar sync --dirty` | Index the working tree without advancing the commit |
-| `cigar sync --all-branches` | Index every local branch |
-| `cigar query <text>` | Retrieve ranked context |
-| `cigar inspect <symbol>` | Symbol detail plus relations |
-| `cigar status [--verify]` | Index state, counts, integrity check |
-| `cigar reindex` | Backup and rebuild from scratch |
+| `cigar init` | Create local configuration, schema, and embedding metadata |
+| `cigar sync` | Incrementally index a branch; `--dirty` indexes the working tree without advancing the indexed commit |
+| `cigar sync --all-branches` | Index local branches |
+| `cigar query <text>` | Retrieve ranked code context |
+| `cigar inspect <symbol>` | Inspect a symbol and its relations |
+| `cigar status [--verify]` | Show index state and optionally verify it |
+| `cigar reindex` | Rebuild the index |
 | `cigar branch list` / `prune` | Inspect or prune indexed branches |
-| `cigar gc [--dry-run] [--prune-branches] [--vacuum]` | Drop unreferenced data |
-| `cigar hook install` / `uninstall` | Manage post-commit/merge/checkout hooks |
-| `cigar model download` / `status` | Manage the embedding model |
-| `cigar repair [--verify] [--head] [--drop-orphans] [--rebuild-vectors]` | Verify and repair |
-| `cigar mcp [--allow-write]` | MCP server over stdio |
-| `cigar version` | Build and schema information |
+| `cigar gc` | Remove unreferenced data |
+| `cigar hook install` / `uninstall` | Manage Git hooks |
+| `cigar model download` / `status` | Manage embedding model files |
+| `cigar repair` | Verify or repair store inconsistencies |
+| `cigar mcp [--allow-write]` | Serve MCP over stdio |
+| `cigar version` | Show version and build information |
 
-Global flags: `--cwd`, `--cig-dir`, `--config`, `--namespace`, `--branch`,
-`--json`, `--quiet`, `--verbose`, `--offline`, `--strict`, `--wait`.
+Use `cigar --help` and `cigar <command> --help` for current flags. Global
+options include `--cwd`, `--cig-dir`, `--config`, `--namespace`, `--branch`,
+`--json`, `--quiet`, `--verbose`, `--offline`, `--strict`, and `--wait`.
 
-Exit codes: `0` success, `1` general, `2` usage, `3` not initialized,
-`4` lock busy, `5` model unavailable, `6` schema/config mismatch, `130` cancelled.
-
-## MCP server
+## MCP
 
 ```bash
 cigar mcp                 # read-only tools
 cigar mcp --allow-write   # also exposes cigar_sync
 ```
 
-Tools: `cigar_query`, `cigar_inspect`, `cigar_status`, and (opt-in)
-`cigar_sync`. Read-only tools carry `readOnlyHint: true`. `cigar_sync` is absent
-from `tools/list` unless `--allow-write` was given at startup.
-
-Example client config:
+The current server provides `cigar_query`, `cigar_inspect`, and `cigar_status`;
+`cigar_sync` is exposed only with `--allow-write`. For example:
 
 ```json
 {
@@ -109,100 +93,29 @@ Example client config:
 }
 ```
 
-## Configuration
+## Current configuration and storage
 
-`.cig/config.toml` is written by `cigar init`. Precedence is
-CLI flag > `CIGAR_*` environment > config file > built-in default.
+`cigar init` writes `.cig/config.toml`. Configuration precedence is CLI flags,
+then `CIGAR_*` environment variables, then the configuration file, then built-in
+defaults. The generated configuration retains legacy embedding settings and
+fingerprinting; changing them can require `cigar reindex`. The default query
+and sync paths do not instantiate an embedding model.
 
-Key settings:
+The local state includes `.cig/store.db`, `.cig/HEAD` (the indexed commit hash),
+branch references and a writer lock. The current schema still uses sqlite-vec
+and branch-specific content-addressed manifests, unlike the target schema.
 
-```toml
-[embedding]
-provider = "onnx-local"                          # or "fake"
-model = "granite-embedding-125m-english"
-dimensions = 768
-max_tokens = 512
-pooling = "cls"                                  # Granite uses CLS, not mean
+Stores created with schema version 2 must not be opened as version 3. Preserve
+the old index by moving the entire `.cig` directory aside, then run `cigar init`
+and `cigar sync` to create a fresh index.
 
-[query]
-top_k = 5
-depth = 1
-max_tokens = 6000
-max_neighbors = 8
+## Tests
 
-[git]
-max_file_bytes = 1048576
-exclude = ["target/**", "node_modules/**"]
-```
-
-Changing `model`, `dimensions`, `template_version`, or normalization changes the
-config fingerprint. A mismatch is refused with exit code `6` and an instruction
-to run `cigar reindex`; it is never silently ignored.
-
-### Models
-
-| Model | Dims | Context | Pooling | License |
-|---|---|---|---|---|
-| `granite-embedding-125m-english` | 768 | 512 | CLS | Apache-2.0 |
-| `granite-embedding-97m-multilingual-r2` | 384 | 512 (32k capable) | CLS | Apache-2.0 |
-
-The 97M multilingual model is **384-dimensional**; the 125M English model is
-768-dimensional. Both use CLS pooling, which is why pooling is data in the model
-manifest rather than hardcoded. Pick one deliberately and reindex when switching.
-
-## Storage
-
-Everything lives in `.cig/`:
-
-```text
-.cig/
-  config.toml
-  store.db        # SQLite + sqlite-vec
-  HEAD            # mirror of the current branch
-  refs/heads/…    # mirror of indexed commits
-  lock            # writer lock
-```
-
-`store.db` uses the content-addressed v2 schema: immutable blobs and symbol
-definitions are shared, while branch manifests and occurrences are per branch.
-`.cig/` is added to `.git/info/exclude` by `cigar init`, so it never appears in
-`git status`.
-
-## Guarantees
-
-- **Incremental equals full.** A sync after changes produces the same manifest,
-  symbol count, and edge count as `sync --full` on a fresh store.
-- **No ghost results.** Query results always join the active branch manifest; a
-  symbol deleted on this branch cannot appear, even if another branch uses it.
-- **No stale work.** `sync --dirty` never advances the stored commit, so a later
-  commit sync still diffs from the correct base.
-- **No silent model drift.** Vector dimension and model identity are recorded and
-  checked; mismatch is an error, not a guess.
-- **No partial writes.** Content and branch batches are single SQLite
-  transactions; a crash leaves a recoverable state, and the next sync recomputes.
-
-## Testing
-
-```bash
-cargo test --workspace          # offline, uses the fake embedder
-cargo clippy --all-targets --workspace
-cargo fmt --all -- --check
-```
-
-Real-model tests are ignored by default:
-
-```bash
-ORT_DYLIB_PATH=/path/to/onnxruntime.dll \
-CIGAR_TEST_MODEL_DIR=$HOME/.cigar/models \
-CIGAR_MODEL_DIR=$HOME/.cigar/models \
-  cargo test --workspace -- --ignored --nocapture
-```
-
-These verify that the ONNX path produces correct, semantically meaningful
-vectors and that a query for "jwt expiry validation" ranks JWT code above UI
-code.
+Run `cargo test --workspace`. Real-model tests require the `semantic` feature,
+a separately installed model and ONNX Runtime. See [the testing design](docs/15-testing-dan-verifikasi.md)
+for additional target verification criteria.
 
 ## License
 
-Engine code: MIT OR Apache-2.0. Models are Apache-2.0 and are **not** bundled;
-`cigar model download` fetches them from their published revision.
+Engine code: MIT OR Apache-2.0. The embedding models are not bundled; consult
+their published licenses and revisions before downloading them.

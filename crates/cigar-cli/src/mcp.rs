@@ -15,7 +15,6 @@ use cigar_core::traits::ContextStore;
 
 use crate::commands::query::{index_info, resolve_indexed_branch};
 use crate::context::Context;
-use crate::embedding::build_embedder;
 
 /// Supported protocol versions, newest first.
 const SUPPORTED_VERSIONS: &[&str] = &["2025-03-26", "2024-11-05"];
@@ -338,8 +337,7 @@ fn tool_query(context: &Context, arguments: &Value) -> Result<Value> {
     };
 
     let index = index_info(context, &store, &branch)?;
-    let embedder = build_embedder(&context.config, context.offline)?;
-    let engine = QueryEngine::new(&store, embedder.as_ref());
+    let engine = QueryEngine::new(&store, None);
     let response = engine.run(&context.namespace, &branch, query, &options, index)?;
     Ok(tool_success(
         &render_text(&response, options.max_tokens),
@@ -520,7 +518,10 @@ fn neighborhood_json(neighborhood: &cigar_core::domain::GraphNeighborhood) -> Va
 
 fn open_store(context: &Context) -> Result<cigar_storage::SqliteStore> {
     context.require_initialized()?;
-    cigar_storage::open_store(&context.store_path(), context.config.embedding.dimensions)
+    Ok(
+        cigar_storage::open_store(&context.store_path(), context.config.embedding.dimensions)?
+            .with_search_config(&context.config.search),
+    )
 }
 
 fn resolve_branch_arg(

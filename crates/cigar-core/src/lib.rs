@@ -16,7 +16,7 @@ pub mod traits;
 pub use error::{EngineError, Result};
 
 /// Schema version produced by this engine.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Content version: bump when symbol extraction or body normalization changes
 /// meaning (see docs/21 ?2.2). Included in `symbol_hash`.

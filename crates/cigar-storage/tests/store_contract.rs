@@ -107,11 +107,12 @@ fn content_batch_is_atomic_and_idempotent() {
 }
 
 #[test]
-fn branch_batch_rejects_missing_vectors() {
+fn lexical_search_works_without_vectors_and_is_branch_scoped() {
     let (_dir, store) = open();
     let ns = namespace();
     let main = branch("main");
-    let alpha = symbol("alpha");
+    let feature = branch("feature");
+    let alpha = symbol("verifyJwtToken");
     let blob = cigar_core::domain::BlobHash::parse(format!("{:064x}", 2)).unwrap();
 
     store
@@ -142,12 +143,165 @@ fn branch_batch_rejects_missing_vectors() {
         removed_files: vec![],
         state: None,
     };
-    let error = store.apply_branch_batch(&ns, &main, batch).unwrap_err();
-    assert!(
-        error.to_string().contains("vektor"),
-        "expected vector guard, got {error}"
+    store.apply_branch_batch(&ns, &main, batch).unwrap();
+    let hits = store.search_lexical(&ns, &main, "jwt token", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].symbol_hash, alpha.symbol_hash);
+    assert!(hits[0].score > 0.0);
+    assert!(store
+        .search_lexical(&ns, &feature, "jwt", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .search_lexical(&ns, &main, "!!!", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .search_lexical(&ns, &main, "jwt", 0)
+        .unwrap()
+        .is_empty());
+    let health = store.health_check().unwrap();
+    assert!(health.ok, "{health:?}");
+    assert_eq!(health.symbols_without_vectors, 1);
+}
+
+#[test]
+fn lexical_settings_control_indexing_and_ranking() {
+    let (_dir, store) = open();
+    let ns = namespace();
+    let main = branch("main");
+    let mut search = cigar_core::config::Config::default().search;
+    search.split_identifiers = false;
+    let store = store.with_search_config(&search);
+    let mut named = symbol("needle");
+    named.signature = "fn unrelated()".into();
+    named.code_snippet = "fn unrelated() {}".into();
+    let mut documented = symbol("other");
+    documented.docstring = Some("needle".into());
+    let compound = symbol("verifyJwtToken");
+    let symbols = vec![named.clone(), documented.clone(), compound];
+    let file = content(19, &symbols, "");
+    store
+        .apply_content_batch(
+            &ns,
+            ContentBatch {
+                files: vec![file.clone()],
+                removed_blobs: vec![],
+            },
+        )
+        .unwrap();
+    let rows = symbols
+        .iter()
+        .enumerate()
+        .map(|(i, symbol)| cigar_core::domain::BranchSymbolRow {
+            symbol_hash: symbol.symbol_hash.clone(),
+            start_line: 1 + i as u32 * 5,
+            end_line: 4 + i as u32 * 5,
+            embedding_key: key_for(&symbol.name),
+            embedding_text: symbol.name.clone(),
+        })
+        .collect();
+    store
+        .apply_branch_batch(
+            &ns,
+            &main,
+            BranchBatch {
+                files: vec![BranchFileContent {
+                    file_path: RepoPath::parse("src/test.rs").unwrap(),
+                    blob_hash: file.blob_hash,
+                    language: Language::Rust,
+                    symbols: rows,
+                    edges: vec![],
+                }],
+                removed_files: vec![],
+                state: None,
+            },
+        )
+        .unwrap();
+    assert!(store
+        .search_lexical(&ns, &main, "jwt", 10)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.search_lexical(&ns, &main, "needle", 1).unwrap()[0].symbol_hash,
+        named.symbol_hash
     );
-    assert!(store.get_branch_manifest(&ns, &main).unwrap().is_empty());
+    search.weights.qualified_name = 0.0;
+    search.weights.docstring = 100.0;
+    let store = store.with_search_config(&search);
+    assert_eq!(
+        store.search_lexical(&ns, &main, "needle", 1).unwrap()[0].symbol_hash,
+        documented.symbol_hash
+    );
+}
+
+#[test]
+fn lexical_ranking_applies_centrality_before_top_k() {
+    let (_dir, store) = open();
+    let ns = namespace();
+    let main = branch("main");
+    let mut symbols: Vec<_> = (0..64)
+        .map(|i| {
+            let mut caller = symbol(&format!("caller{i}"));
+            caller.code_snippet.push_str(" needle");
+            caller
+        })
+        .collect();
+    let mut target = symbol("target");
+    target
+        .code_snippet
+        .push_str(" needle filler filler filler filler filler filler filler filler");
+    symbols.push(target.clone());
+    let file = content(3, &symbols, "");
+    let rows = symbols
+        .iter()
+        .enumerate()
+        .map(|(i, symbol)| cigar_core::domain::BranchSymbolRow {
+            symbol_hash: symbol.symbol_hash.clone(),
+            start_line: 1 + i as u32 * 5,
+            end_line: 4 + i as u32 * 5,
+            embedding_key: key_for(&symbol.name),
+            embedding_text: symbol.name.clone(),
+        })
+        .collect();
+    let edges = symbols[..64]
+        .iter()
+        .map(|caller| cigar_core::domain::BranchEdgeRow {
+            source_symbol_hash: caller.symbol_hash.clone(),
+            target_name: target.name.clone(),
+            relation: cigar_core::domain::EdgeRelation::Calls,
+            target_symbol_hash: Some(target.symbol_hash.clone()),
+        })
+        .collect();
+    store
+        .apply_content_batch(
+            &ns,
+            ContentBatch {
+                files: vec![file.clone()],
+                removed_blobs: vec![],
+            },
+        )
+        .unwrap();
+    store
+        .apply_branch_batch(
+            &ns,
+            &main,
+            BranchBatch {
+                files: vec![BranchFileContent {
+                    file_path: RepoPath::parse("src/lib.rs").unwrap(),
+                    blob_hash: file.blob_hash,
+                    language: Language::Rust,
+                    symbols: rows,
+                    edges,
+                }],
+                removed_files: vec![],
+                state: None,
+            },
+        )
+        .unwrap();
+    let hits = store.search_lexical(&ns, &main, "needle", 1).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].symbol_hash, target.symbol_hash);
 }
 
 #[test]
@@ -442,7 +596,7 @@ fn schema_version_and_branch_state_round_trip() {
     let (_dir, store) = open();
     let ns = namespace();
     let main = branch("main");
-    assert_eq!(store.schema_version().unwrap(), 2);
+    assert_eq!(store.schema_version().unwrap(), 3);
     assert!(store.get_branch_state(&ns, &main).unwrap().is_none());
 
     let state = BranchState {

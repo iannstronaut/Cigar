@@ -58,7 +58,7 @@ pub struct SyncOutcome {
 /// The sync engine.
 pub struct SyncEngine<'a> {
     store: &'a dyn ContextStore,
-    embedder: &'a dyn Embedder,
+    embedder: Option<&'a dyn Embedder>,
     registry: &'a ParserRegistry,
     config: &'a Config,
     clock: &'a dyn Clock,
@@ -69,7 +69,7 @@ impl<'a> SyncEngine<'a> {
     /// Creates an engine over explicit adapters.
     pub fn new(
         store: &'a dyn ContextStore,
-        embedder: &'a dyn Embedder,
+        embedder: Option<&'a dyn Embedder>,
         registry: &'a ParserRegistry,
         config: &'a Config,
         clock: &'a dyn Clock,
@@ -308,28 +308,34 @@ impl<'a> SyncEngine<'a> {
             }
         }
 
-        // --- vectors -----------------------------------------------------
-        self.progress.phase_started(SyncPhase::Embed, None);
-        let keys: Vec<EmbeddingKey> = files
-            .iter()
-            .flat_map(|file| {
-                file.symbols
-                    .iter()
-                    .map(|symbol| symbol.embedding_key.clone())
-            })
-            .collect();
-        let present = self.store.existing_vector_keys(namespace, &keys)?;
-        let existing: BTreeSet<EmbeddingKey> = keys
-            .iter()
-            .zip(present)
-            .filter_map(|(key, exists)| exists.then_some(key.clone()))
-            .collect();
-        let (pending, reused) = pending_vectors(&files, &|key| existing.contains(key));
-        let embeddings = self.embed_pending(&pending)?;
-        let computed = embeddings.len() as u64;
-        if !embeddings.is_empty() {
-            self.store.ensure_vectors(namespace, &embeddings)?;
-        }
+        // Vector indexing is optional; the default lexical graph path skips
+        // model loading and keeps embedding counters at zero.
+        let (computed, reused) = if let Some(embedder) = self.embedder {
+            self.progress.phase_started(SyncPhase::Embed, None);
+            let keys: Vec<EmbeddingKey> = files
+                .iter()
+                .flat_map(|file| {
+                    file.symbols
+                        .iter()
+                        .map(|symbol| symbol.embedding_key.clone())
+                })
+                .collect();
+            let present = self.store.existing_vector_keys(namespace, &keys)?;
+            let existing: BTreeSet<EmbeddingKey> = keys
+                .iter()
+                .zip(present)
+                .filter_map(|(key, exists)| exists.then_some(key.clone()))
+                .collect();
+            let (pending, reused) = pending_vectors(&files, &|key| existing.contains(key));
+            let embeddings = self.embed_pending(embedder, &pending)?;
+            let computed = embeddings.len() as u64;
+            if !embeddings.is_empty() {
+                self.store.ensure_vectors(namespace, &embeddings)?;
+            }
+            (computed, reused)
+        } else {
+            (0, 0)
+        };
 
         // --- write content ----------------------------------------------
         self.progress.phase_started(SyncPhase::Write, None);
@@ -379,13 +385,14 @@ impl<'a> SyncEngine<'a> {
             .state
             .as_ref()
             .map_or(SyncStatus::Ready, |state| state.status);
+        // The storage batch resolves the complete branch graph atomically with
+        // the manifest and state update.
+        self.progress.phase_started(SyncPhase::Resolve, None);
         let branch_outcome = self
             .store
             .apply_branch_batch(namespace, branch, branch_batch)?;
 
-        // --- edges -------------------------------------------------------
-        self.progress.phase_started(SyncPhase::Resolve, None);
-        let (resolved, unresolved) = self.resolve_edges(namespace, branch, &files)?;
+        let graph_stats = self.store.stats(namespace, branch)?;
 
         // --- summary -----------------------------------------------------
         let mut summary = SyncSummary {
@@ -394,8 +401,10 @@ impl<'a> SyncEngine<'a> {
             embeddings_computed: computed,
             embeddings_reused: reused,
             edges_inserted: branch_outcome.edges_written,
-            edges_resolved: resolved,
-            edges_unresolved: unresolved,
+            edges_resolved: graph_stats
+                .edges
+                .saturating_sub(graph_stats.unresolved_edges),
+            edges_unresolved: graph_stats.unresolved_edges,
             symbols_added: content_outcome.symbol_defs_inserted,
             symbols_modified: content_outcome
                 .symbol_defs_inserted
@@ -431,7 +440,7 @@ impl<'a> SyncEngine<'a> {
         self.progress.phase_finished(
             SyncPhase::Resolve,
             &crate::traits::PhaseSummary {
-                processed: resolved + unresolved,
+                processed: graph_stats.edges,
                 elapsed_ms: 0,
             },
         );
@@ -514,6 +523,7 @@ impl<'a> SyncEngine<'a> {
 
     fn embed_pending(
         &self,
+        embedder: &dyn Embedder,
         pending: &[(EmbeddingKey, String)],
     ) -> Result<Vec<(EmbeddingKey, Vec<f32>)>> {
         let batch_size = self.config.embedding.batch_size.max(1);
@@ -521,7 +531,7 @@ impl<'a> SyncEngine<'a> {
         let mut out = Vec::with_capacity(pending.len());
         for chunk in pending.chunks(batch_size) {
             let texts: Vec<String> = chunk.iter().map(|(_, text)| text.clone()).collect();
-            let vectors = self.embedder.embed_batch(&texts)?;
+            let vectors = embedder.embed_batch(&texts)?;
             if vectors.len() != texts.len() {
                 return Err(EngineError::Embedding {
                     message: format!(
@@ -547,47 +557,6 @@ impl<'a> SyncEngine<'a> {
             }
         }
         Ok(out)
-    }
-
-    fn resolve_edges(
-        &self,
-        namespace: &Namespace,
-        branch: &BranchName,
-        files: &[PlannedFile],
-    ) -> Result<(u64, u64)> {
-        // Resolve any pending edge whose target name now has exactly one match.
-        let mut names: BTreeSet<String> = BTreeSet::new();
-        for file in files {
-            for edge in &file.edges {
-                names.insert(edge.target_name.clone());
-            }
-        }
-
-        let mut resolved = 0_u64;
-        let mut unresolved = 0_u64;
-        for name in names {
-            let pending_edges = self
-                .store
-                .unresolved_edges_for_name(namespace, branch, &name, 500)?;
-            if pending_edges.is_empty() {
-                continue;
-            }
-            let candidates = self.store.find_symbols(namespace, branch, &name, 2)?;
-            match candidates.len() {
-                0 => unresolved += pending_edges.len() as u64,
-                1 => {
-                    let target = candidates[0].symbol.symbol_hash.clone();
-                    for edge in &pending_edges {
-                        self.store.resolve_edge(namespace, branch, edge, &target)?;
-                        resolved += 1;
-                    }
-                }
-                // Ambiguous names stay unresolved: guessing fabricates a
-                // relationship (docs/05 section 9).
-                _ => unresolved += pending_edges.len() as u64,
-            }
-        }
-        Ok((resolved, unresolved))
     }
 
     fn scan_for_mode(
@@ -757,7 +726,7 @@ pub fn branch_fingerprint(files: &[BranchFile]) -> Digest {
 #[allow(clippy::too_many_arguments)]
 pub fn run_sync(
     store: &dyn ContextStore,
-    embedder: &dyn Embedder,
+    embedder: Option<&dyn Embedder>,
     registry: &ParserRegistry,
     config: &Config,
     clock: &dyn Clock,

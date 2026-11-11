@@ -228,6 +228,11 @@ pub(crate) fn apply_branch(
         )
         .map_err(storage)?;
         tx.execute(
+            "DELETE FROM symbol_fts WHERE namespace = ?1 AND branch_name = ?2 AND file_path = ?3",
+            params![namespace.as_str(), branch.as_str(), path.as_str()],
+        )
+        .map_err(storage)?;
+        tx.execute(
             "DELETE FROM branch_symbols WHERE namespace = ?1 AND branch_name = ?2 AND file_path = ?3",
             params![namespace.as_str(), branch.as_str(), path.as_str()],
         )
@@ -240,11 +245,31 @@ pub(crate) fn apply_branch(
     }
 
     for file in &batch.files {
-        write_branch_file(&tx, namespace, branch, file)?;
+        write_branch_file(&tx, namespace, branch, file, store.search.split_identifiers)?;
         outcome.files_written += 1;
         outcome.symbols_written += file.symbols.len() as u64;
         outcome.edges_written += file.edges.len() as u64;
     }
+
+    // Re-evaluate every edge against the complete resulting branch. Changes to
+    // a target can resolve an old edge or make an existing match ambiguous.
+    tx.execute(
+        "UPDATE branch_edges
+         SET target_symbol_hash = (
+             SELECT CASE WHEN COUNT(*) = 1 THEN MIN(bs.symbol_hash) ELSE NULL END
+             FROM branch_symbols bs
+             JOIN symbol_defs sd ON sd.symbol_hash = bs.symbol_hash
+             WHERE bs.namespace = branch_edges.namespace
+               AND bs.branch_name = branch_edges.branch_name
+               AND (sd.qualified_name = branch_edges.target_name
+                    OR sd.name = branch_edges.target_name
+                    OR sd.qualified_name LIKE '%::' || branch_edges.target_name
+                    OR sd.qualified_name LIKE '%.' || branch_edges.target_name)
+         )
+         WHERE namespace = ?1 AND branch_name = ?2",
+        params![namespace.as_str(), branch.as_str()],
+    )
+    .map_err(storage)?;
 
     if let Some(state) = &batch.state {
         tx.execute(
@@ -277,6 +302,7 @@ fn write_branch_file(
     namespace: &Namespace,
     branch: &cigar_core::domain::BranchName,
     file: &BranchFileContent,
+    split_identifiers: bool,
 ) -> Result<()> {
     tx.execute(
         "DELETE FROM branch_edges WHERE namespace = ?1 AND branch_name = ?2 AND file_path = ?3",
@@ -285,6 +311,11 @@ fn write_branch_file(
     .map_err(storage)?;
     tx.execute(
         "DELETE FROM branch_symbols WHERE namespace = ?1 AND branch_name = ?2 AND file_path = ?3",
+        params![namespace.as_str(), branch.as_str(), file.file_path.as_str()],
+    )
+    .map_err(storage)?;
+    tx.execute(
+        "DELETE FROM symbol_fts WHERE namespace = ?1 AND branch_name = ?2 AND file_path = ?3",
         params![namespace.as_str(), branch.as_str(), file.file_path.as_str()],
     )
     .map_err(storage)?;
@@ -303,7 +334,6 @@ fn write_branch_file(
     )
     .map_err(storage)?;
 
-    let mut checked: std::collections::BTreeSet<&EmbeddingKey> = std::collections::BTreeSet::new();
     for symbol in &file.symbols {
         tx.execute(
             "INSERT INTO branch_symbols(namespace, branch_name, file_path, blob_hash, language,
@@ -322,15 +352,14 @@ fn write_branch_file(
             ],
         )
         .map_err(storage)?;
-
-        if checked.insert(&symbol.embedding_key)
-            && !vector_exists(tx, namespace, &symbol.embedding_key)?
-        {
-            return Err(EngineError::storage(format!(
-                "vektor untuk embedding_key {} belum ditulis; batch branch ditolak",
-                symbol.embedding_key
-            )));
-        }
+        insert_fts_row(
+            tx,
+            namespace,
+            branch,
+            &file.file_path,
+            symbol,
+            split_identifiers,
+        )?;
     }
 
     for edge in &file.edges {
@@ -355,20 +384,98 @@ fn write_branch_file(
 
     Ok(())
 }
-
-fn vector_exists(
+fn insert_fts_row(
     tx: &rusqlite::Transaction<'_>,
     namespace: &Namespace,
-    key: &EmbeddingKey,
-) -> Result<bool> {
-    let count: i64 = tx
+    branch: &cigar_core::domain::BranchName,
+    file_path: &cigar_core::domain::RepoPath,
+    symbol: &cigar_core::domain::BranchSymbolRow,
+    split_identifiers: bool,
+) -> Result<()> {
+    let (name, qualified_name, signature, docstring, code_snippet): (
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+    ) = tx
         .query_row(
-            "SELECT COUNT(*) FROM symbol_vectors WHERE embedding_key = ?1 AND namespace = ?2",
-            params![key.as_str(), namespace.as_str()],
-            |row| row.get(0),
+            "SELECT name, qualified_name, signature, docstring, code_snippet
+             FROM symbol_defs WHERE symbol_hash = ?1",
+            params![symbol.symbol_hash.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .map_err(storage)?;
-    Ok(count > 0)
+    tx.execute(
+        "INSERT INTO symbol_fts(
+             namespace, branch_name, file_path, symbol_hash, start_line, embedding_key,
+             name, qualified_name, signature, docstring, code_snippet
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            namespace.as_str(),
+            branch.as_str(),
+            file_path.as_str(),
+            symbol.symbol_hash.as_str(),
+            symbol.start_line as i64,
+            symbol.embedding_key.as_str(),
+            lexical_text(&name, split_identifiers),
+            lexical_text(&qualified_name, split_identifiers),
+            lexical_text(&signature, split_identifiers),
+            lexical_text(docstring.as_deref().unwrap_or_default(), split_identifiers),
+            lexical_text(&code_snippet, split_identifiers),
+        ],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+pub(crate) fn lexical_text(value: &str, split_identifiers: bool) -> String {
+    if !split_identifiers {
+        return value.to_owned();
+    }
+    let mut out = String::with_capacity(value.len() + value.len() / 2);
+    out.push_str(value);
+    for token in value
+        .split(|character: char| !character.is_alphanumeric())
+        .flat_map(split_identifier)
+        .filter(|token| !token.is_empty())
+    {
+        out.push(' ');
+        out.push_str(&token);
+    }
+    out
+}
+
+fn split_identifier(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = value.chars().collect();
+    let mut start = 0;
+    for index in 1..chars.len() {
+        let previous = chars[index - 1];
+        let current = chars[index];
+        let next = chars.get(index + 1).copied();
+        let boundary = previous.is_numeric() != current.is_numeric()
+            || (current.is_uppercase() && previous.is_lowercase())
+            || (current.is_uppercase()
+                && previous.is_uppercase()
+                && next.is_some_and(char::is_lowercase));
+        if boundary {
+            tokens.push(chars[start..index].iter().collect());
+            start = index;
+        }
+    }
+    if start < chars.len() {
+        tokens.push(chars[start..].iter().collect());
+    }
+    tokens
 }
 
 fn upsert_branch_ref(
@@ -473,48 +580,121 @@ mod tests {
     }
 
     #[test]
-    fn branch_batch_requires_existing_vectors() {
+    fn branch_batches_recompute_old_edges_and_roll_back_on_resolution_failure() {
+        use cigar_core::domain::{BranchEdgeRow, BranchName, BranchSymbolRow, EdgeRelation};
+
         let (_dir, store) = open();
         let ns = Namespace::default();
-        let branch = cigar_core::domain::BranchName::parse("main").unwrap();
-        let sym = symbol("beta");
-        let blob = cigar_core::domain::BlobHash::parse(format!("{:064x}", 2)).unwrap();
-        let content = ContentBatch {
-            files: vec![ContentFile {
-                blob_hash: blob.clone(),
+        let branch = BranchName::parse("main").unwrap();
+        let caller = symbol("caller");
+        let target = symbol("target");
+        let mut other = symbol("other");
+        other.name = "target".into();
+        other.qualified_name = "module::target".into();
+
+        let make_file = |seed: u8, path: &str, sym: &SymbolDef, edges: Vec<BranchEdgeRow>| {
+            let blob_hash = cigar_core::domain::BlobHash::parse(format!("{seed:064x}")).unwrap();
+            let content = ContentFile {
+                blob_hash: blob_hash.clone(),
                 language: Language::Rust,
                 imports: String::new(),
-                size_bytes: 5,
+                size_bytes: 10,
                 symbols: vec![ParsedSymbolContent {
                     symbol: sym.clone(),
                     start_line: 1,
-                    end_line: 3,
+                    end_line: 2,
                 }],
                 edges: vec![],
-            }],
-            removed_blobs: vec![],
-        };
-        store.apply_content_batch(&ns, content).unwrap();
-
-        let key = cigar_core::hash::embedding_key(1, "text");
-        let batch = BranchBatch {
-            files: vec![BranchFileContent {
-                file_path: RepoPath::parse("src/a.rs").unwrap(),
-                blob_hash: blob,
+            };
+            let branch_file = BranchFileContent {
+                file_path: RepoPath::parse(path).unwrap(),
+                blob_hash,
                 language: Language::Rust,
-                symbols: vec![cigar_core::domain::BranchSymbolRow {
+                symbols: vec![BranchSymbolRow {
                     symbol_hash: sym.symbol_hash.clone(),
                     start_line: 1,
-                    end_line: 3,
-                    embedding_key: key,
-                    embedding_text: "text".into(),
+                    end_line: 2,
+                    embedding_key: cigar_core::hash::embedding_key(1, path),
+                    embedding_text: path.into(),
                 }],
-                edges: vec![],
-            }],
-            removed_files: vec![],
-            state: None,
+                edges,
+            };
+            (content, branch_file)
         };
-        let error = store.apply_branch_batch(&ns, &branch, batch).unwrap_err();
-        assert!(error.to_string().contains("vektor"), "{error}");
+        let edge = BranchEdgeRow {
+            source_symbol_hash: caller.symbol_hash.clone(),
+            target_name: "target".into(),
+            relation: EdgeRelation::Calls,
+            target_symbol_hash: None,
+        };
+        let (c1, f1) = make_file(1, "caller.rs", &caller, vec![edge]);
+        let (c2, f2) = make_file(2, "target.rs", &target, vec![]);
+        let (c3, f3) = make_file(3, "other.rs", &other, vec![]);
+        store
+            .apply_content_batch(
+                &ns,
+                ContentBatch {
+                    files: vec![c1, c2, c3],
+                    removed_blobs: vec![],
+                },
+            )
+            .unwrap();
+        let apply = |files, removed_files| {
+            store.apply_branch_batch(
+                &ns,
+                &branch,
+                BranchBatch {
+                    files,
+                    removed_files,
+                    state: None,
+                },
+            )
+        };
+        let unresolved = || store.stats(&ns, &branch).unwrap().unresolved_edges;
+
+        apply(vec![f1], vec![]).unwrap();
+        assert_eq!(unresolved(), 1);
+        apply(vec![f2.clone()], vec![]).unwrap();
+        assert_eq!(unresolved(), 0);
+        apply(vec![f3.clone()], vec![]).unwrap();
+        assert_eq!(unresolved(), 1);
+        apply(vec![], vec![f2.file_path.clone()]).unwrap();
+        assert_eq!(unresolved(), 0);
+        let conn = store.conn().unwrap();
+        let resolved: String = conn
+            .query_row("SELECT target_symbol_hash FROM branch_edges", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(resolved, other.symbol_hash.as_str());
+        conn.execute_batch(
+            "CREATE TRIGGER fail_edge_resolution BEFORE UPDATE ON branch_edges
+             BEGIN SELECT RAISE(ABORT, 'resolution failed'); END;",
+        )
+        .unwrap();
+        drop(conn);
+        assert!(apply(vec![f2], vec![]).is_err());
+        assert_eq!(unresolved(), 0);
+        assert_eq!(store.get_branch_manifest(&ns, &branch).unwrap().len(), 2);
+        let conn = store.conn().unwrap();
+        conn.execute_batch("DROP TRIGGER fail_edge_resolution")
+            .unwrap();
+        drop(conn);
+        apply(vec![], vec![f3.file_path]).unwrap();
+        assert_eq!(unresolved(), 1);
+    }
+
+    #[test]
+    fn splits_acronyms_digits_and_identifiers() {
+        let tokens = lexical_text("parseHTML2JSON snake_case", true);
+        let pieces: Vec<_> = tokens.split_whitespace().collect();
+        assert_eq!(
+            &pieces[2..],
+            &["parse", "HTML", "2", "JSON", "snake", "case"]
+        );
+        assert_eq!(
+            lexical_text("parseHTML2JSON snake_case", false),
+            "parseHTML2JSON snake_case"
+        );
     }
 }

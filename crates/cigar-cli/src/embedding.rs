@@ -1,5 +1,6 @@
 //! Embedding backend selection and model preparation.
 
+#[cfg(feature = "semantic")]
 use std::path::Path;
 
 use cigar_core::config::Config;
@@ -7,7 +8,9 @@ use cigar_core::domain::EmbeddingProvider;
 use cigar_core::error::{EngineError, Result};
 use cigar_core::traits::Embedder;
 use cigar_embed::manifest::ModelManifest;
-use cigar_embed::{ensure_runtime, FakeEmbedder, OnnxEmbedder};
+use cigar_embed::FakeEmbedder;
+#[cfg(feature = "semantic")]
+use cigar_embed::{ensure_runtime, OnnxEmbedder};
 
 /// Builds the embedder named by config.
 ///
@@ -20,6 +23,7 @@ pub fn build_embedder(config: &Config, offline: bool) -> Result<Box<dyn Embedder
             FakeEmbedder::new(config.embedding.dimensions)?
                 .with_max_tokens(config.embedding.max_tokens),
         )),
+        #[cfg(feature = "semantic")]
         EmbeddingProvider::OnnxLocal => {
             let manifest = resolve_manifest(config)?;
             let model_dir = manifest.directory(&config.embedding.model_dir);
@@ -47,6 +51,10 @@ pub fn build_embedder(config: &Config, offline: bool) -> Result<Box<dyn Embedder
             )?;
             Ok(Box::new(embedder))
         }
+        #[cfg(not(feature = "semantic"))]
+        EmbeddingProvider::OnnxLocal => Err(EngineError::ModelUnavailable {
+            message: "backend ONNX tidak tersedia; bangun cigar dengan fitur `semantic`".into(),
+        }),
     }
 }
 
@@ -89,6 +97,7 @@ mod tests {
         assert_eq!(embedder.model_id(), "fake");
     }
 
+    #[cfg(feature = "semantic")]
     #[test]
     fn missing_model_is_actionable() {
         let config = Config::default();
@@ -97,6 +106,16 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("model download"), "{error}");
+    }
+
+    #[cfg(not(feature = "semantic"))]
+    #[test]
+    fn disabled_onnx_is_actionable() {
+        let error = match build_embedder(&Config::default(), false) {
+            Ok(_) => panic!("backend ONNX seharusnya tidak tersedia"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("semantic"), "{error}");
     }
 
     #[test]

@@ -1,13 +1,13 @@
 //! Schema version and canonical DDL (docs/21 ?3).
 //!
-//! `SCHEMA_SQL_V2` is executed inside one transaction on first init. The vector
+//! `SCHEMA_SQL_V3` is executed inside one transaction on first init. The vector
 //! dimension is substituted from validated config, never from raw input.
 
 /// Schema version understood by this build.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = cigar_core::SCHEMA_VERSION;
 
-/// DDL for schema version 2. `{DIM}` is replaced with a validated integer.
-pub const SCHEMA_SQL_V2: &str = r#"
+/// DDL for schema version 3. `{DIM}` is replaced with a validated integer.
+pub const SCHEMA_SQL_V3: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -132,6 +132,21 @@ CREATE INDEX IF NOT EXISTS idx_branch_edges_target
 CREATE INDEX IF NOT EXISTS idx_branch_edges_source
     ON branch_edges(namespace, branch_name, source_symbol_hash);
 
+CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts USING fts5(
+    namespace UNINDEXED,
+    branch_name UNINDEXED,
+    file_path UNINDEXED,
+    symbol_hash UNINDEXED,
+    start_line UNINDEXED,
+    embedding_key UNINDEXED,
+    name,
+    qualified_name,
+    signature,
+    docstring,
+    code_snippet,
+    tokenize = 'porter unicode61'
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS symbol_vectors USING vec0(
     embedding_key TEXT PRIMARY KEY,
     namespace     TEXT PARTITION KEY,
@@ -142,7 +157,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbol_vectors USING vec0(
 /// Builds the DDL with a validated dimension.
 #[must_use]
 pub fn ddl_for_dimensions(dimensions: usize) -> String {
-    SCHEMA_SQL_V2.replace("{DIM}", &dimensions.to_string())
+    SCHEMA_SQL_V3.replace("{DIM}", &dimensions.to_string())
 }
 
 /// Required `meta` keys (docs/03 ?5, docs/21 ?3).
@@ -169,11 +184,11 @@ mod tests {
     }
 
     #[test]
-    fn ddl_is_schema_v2() {
-        assert_eq!(SUPPORTED_SCHEMA_VERSION, 2);
-        assert!(SCHEMA_SQL_V2.contains("branch_refs"));
-        assert!(SCHEMA_SQL_V2.contains("symbol_defs"));
-        assert!(SCHEMA_SQL_V2.contains("embedding_key"));
-        assert!(!SCHEMA_SQL_V2.contains("file_path_hint"));
+    fn ddl_is_schema_v3() {
+        assert_eq!(SUPPORTED_SCHEMA_VERSION, 3);
+        assert!(SCHEMA_SQL_V3.contains("branch_refs"));
+        assert!(SCHEMA_SQL_V3.contains("symbol_defs"));
+        assert!(SCHEMA_SQL_V3.contains("embedding_key"));
+        assert!(!SCHEMA_SQL_V3.contains("file_path_hint"));
     }
 }

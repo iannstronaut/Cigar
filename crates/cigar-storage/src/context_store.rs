@@ -273,6 +273,98 @@ impl ContextStore for SqliteStore {
         Ok(results)
     }
 
+    fn search_lexical(
+        &self,
+        namespace: &Namespace,
+        branch: &BranchName,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<ScoredOccurrence>> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let terms = crate::batch::lexical_text(query, self.search.split_identifiers)
+            .split(|character: char| !character.is_alphanumeric())
+            .filter(|term| !term.is_empty())
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect::<std::collections::BTreeSet<_>>();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let match_query = terms.into_iter().collect::<Vec<_>>().join(" OR ");
+        let conn = self.conn()?;
+        let mut statement = conn
+            .prepare(
+                "SELECT f.symbol_hash, f.file_path, f.start_line, s.end_line,
+                        f.embedding_key,
+                        bm25(symbol_fts, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                             ?4, ?4, ?5, ?6, ?7) AS rank,
+                        (SELECT COUNT(DISTINCT e.source_symbol_hash) FROM branch_edges e
+                         WHERE e.namespace = f.namespace AND e.branch_name = f.branch_name
+                           AND e.target_symbol_hash = f.symbol_hash AND e.relation = 'CALLS') AS indegree
+                 FROM symbol_fts f
+                 JOIN branch_symbols s
+                   ON s.namespace = f.namespace AND s.branch_name = f.branch_name
+                  AND s.file_path = f.file_path AND s.symbol_hash = f.symbol_hash
+                  AND s.start_line = f.start_line
+                 WHERE f.namespace = ?1 AND f.branch_name = ?2
+                   AND symbol_fts MATCH ?3",
+            )
+            .map_err(storage)?;
+        let rows = statement
+            .query_map(
+                params![
+                    namespace.as_str(),
+                    branch.as_str(),
+                    match_query,
+                    self.search.weights.qualified_name,
+                    self.search.weights.signature,
+                    self.search.weights.docstring,
+                    self.search.weights.code_tokens
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, f64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .map_err(storage)?;
+        let mut results = Vec::new();
+        for row in rows {
+            let (symbol_hash, file_path, start_line, end_line, embedding_key, rank, indegree) =
+                row.map_err(storage)?;
+            let score = ((-rank).max(0.0) * (1.0 + (1.0 + indegree as f64).ln())) as f32;
+            results.push(ScoredOccurrence {
+                embedding_key: EmbeddingKey::parse(embedding_key)?,
+                symbol_hash: SymbolHash::parse(symbol_hash)?,
+                file_path: RepoPath::parse(file_path)?,
+                start_line: u32::try_from(start_line)
+                    .map_err(|_| EngineError::storage("start_line di luar rentang"))?,
+                end_line: u32::try_from(end_line)
+                    .map_err(|_| EngineError::storage("end_line di luar rentang"))?,
+                distance: 1.0 - score,
+                score,
+                pending_code: String::new(),
+            });
+        }
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.start_line.cmp(&b.start_line))
+                .then_with(|| a.symbol_hash.cmp(&b.symbol_hash))
+        });
+        results.truncate(top_k);
+        Ok(results)
+    }
+
     fn get_neighbors(
         &self,
         namespace: &Namespace,
@@ -1073,6 +1165,11 @@ fn garbage_collect(
         for branch in &stale {
             if !opts.dry_run {
                 tx.execute(
+                    "DELETE FROM symbol_fts WHERE namespace = ?1 AND branch_name = ?2",
+                    params![namespace.as_str(), branch],
+                )
+                .map_err(storage)?;
+                tx.execute(
                     "DELETE FROM branch_refs WHERE namespace = ?1 AND branch_name = ?2",
                     params![namespace.as_str(), branch],
                 )
@@ -1098,6 +1195,19 @@ fn garbage_collect(
             )
             .map_err(storage)?;
         report.orphan_branch_symbols = orphan_symbols as u64;
+        tx.execute(
+            "DELETE FROM symbol_fts
+             WHERE NOT EXISTS (
+                SELECT 1 FROM branch_symbols bs
+                WHERE bs.namespace = symbol_fts.namespace
+                  AND bs.branch_name = symbol_fts.branch_name
+                  AND bs.file_path = symbol_fts.file_path
+                  AND bs.symbol_hash = symbol_fts.symbol_hash
+                  AND bs.start_line = symbol_fts.start_line
+             )",
+            [],
+        )
+        .map_err(storage)?;
     }
 
     let orphan_keys: Vec<String> = {
@@ -1202,7 +1312,12 @@ impl SqliteStore {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage)?;
-        for table in ["branch_edges", "branch_symbols", "branch_files"] {
+        for table in [
+            "branch_edges",
+            "branch_symbols",
+            "symbol_fts",
+            "branch_files",
+        ] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE namespace = ?1 AND branch_name = ?2"),
                 params![namespace.as_str(), branch.as_str()],

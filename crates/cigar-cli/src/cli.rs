@@ -58,7 +58,7 @@ pub struct GlobalArgs {
     pub verbose: bool,
 
     /// Disable colored output.
-    #[arg(long, global = true, env = "NO_COLOR", hide_env_values = true)]
+    #[arg(long, global = true)]
     pub no_color: bool,
 
     /// Disable progress rendering.
@@ -116,8 +116,8 @@ pub struct InitArgs {
     pub git_mode: String,
 
     /// Embedding provider.
-    #[arg(long, default_value = "onnx-local", value_name = "PROVIDER")]
-    pub embedding: String,
+    #[arg(long, value_name = "PROVIDER")]
+    pub embedding: Option<String>,
 
     /// Model identifier.
     #[arg(long, value_name = "ID")]

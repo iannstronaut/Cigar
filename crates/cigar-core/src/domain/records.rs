@@ -168,7 +168,6 @@ impl StoreHealth {
         self.ok = self.foreign_key_violations == 0
             && self.quick_check_ok
             && self.orphan_vectors == 0
-            && self.symbols_without_vectors == 0
             && self.dangling_edges == 0
             && self.manifest_files_without_symbols == 0;
         self

@@ -2,6 +2,7 @@
 
 use cigar_core::error::Result;
 use cigar_embed::manifest::ModelStatus;
+#[cfg(feature = "semantic")]
 use cigar_embed::{download_model, ensure_runtime};
 
 use crate::cli::{ModelArgs, ModelCommand};
@@ -97,6 +98,7 @@ fn status(context: &Context, printer: &Printer) -> Result<i32> {
     Ok(0)
 }
 
+#[cfg(feature = "semantic")]
 fn download(
     context: &Context,
     printer: &Printer,
@@ -178,4 +180,23 @@ fn download(
     }
     manifest.revision.clear();
     Ok(0)
+}
+
+#[cfg(not(feature = "semantic"))]
+fn download(
+    context: &Context,
+    _printer: &Printer,
+    _model: Option<&str>,
+    _revision: Option<&str>,
+    _model_dir: Option<std::path::PathBuf>,
+    _force: bool,
+) -> Result<i32> {
+    if context.offline {
+        return Err(cigar_core::EngineError::ModelUnavailable {
+            message: "unduhan model tidak tersedia dalam mode offline".into(),
+        });
+    }
+    Err(cigar_core::EngineError::ModelUnavailable {
+        message: "unduhan model tidak tersedia; bangun cigar dengan fitur `semantic`".into(),
+    })
 }

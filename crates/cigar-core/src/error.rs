@@ -62,7 +62,7 @@ pub enum EngineError {
     #[error("schema {found} lebih baru dari yang didukung ({supported}); perbarui CIGAR")]
     SchemaTooNew { found: u32, supported: u32 },
 
-    #[error("schema tidak didukung: {found} (diharapkan {expected})")]
+    #[error("schema tidak didukung: {found} (diharapkan {expected}); untuk membangun ulang indeks dengan aman, hentikan proses cigar, pindahkan seluruh direktori .cig dan database atau konfigurasi di luar .cig jika ada ke lokasi cadangan yang belum ada; jalankan `cigar init` dengan konfigurasi yang sesuai lalu `cigar sync`; simpan cadangan sampai data yang diperlukan dipulihkan")]
     SchemaMismatch { found: u32, expected: u32 },
 
     #[error(

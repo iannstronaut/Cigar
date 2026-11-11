@@ -94,7 +94,7 @@ fn sync(
     let source = GitSource::discover(repo.root(), config.git.max_file_bytes).unwrap();
     let registry = ParserRegistry::with_defaults();
     let clock = SystemClock;
-    let engine = SyncEngine::new(store, embedder, &registry, config, &clock);
+    let engine = SyncEngine::new(store, Some(embedder), &registry, config, &clock);
     engine
         .run(
             &source,
@@ -503,7 +503,7 @@ fn config_drift_is_rejected() {
     let source = GitSource::discover(repo.root(), config.git.max_file_bytes).unwrap();
     let registry = ParserRegistry::with_defaults();
     let clock = SystemClock;
-    let engine = SyncEngine::new(&store, &embedder, &registry, &config, &clock);
+    let engine = SyncEngine::new(&store, Some(&embedder), &registry, &config, &clock);
     let error = engine
         .run(
             &source,

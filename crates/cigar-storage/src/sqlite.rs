@@ -40,6 +40,7 @@ pub struct SqliteStore {
     path: PathBuf,
     read_only: bool,
     dimensions: usize,
+    pub(crate) search: cigar_core::config::SearchConfig,
 }
 
 impl std::fmt::Debug for SqliteStore {
@@ -73,9 +74,17 @@ impl SqliteStore {
             path: path.to_path_buf(),
             read_only: !create,
             dimensions,
+            search: cigar_core::config::Config::default().search,
         };
         store.verify_vec_extension()?;
         Ok(store)
+    }
+
+    /// Applies the search settings used by indexing and lexical queries.
+    #[must_use]
+    pub fn with_search_config(mut self, search: &cigar_core::config::SearchConfig) -> Self {
+        self.search = search.clone();
+        self
     }
 
     fn verify_vec_extension(&self) -> Result<()> {

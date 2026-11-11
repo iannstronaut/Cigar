@@ -257,7 +257,59 @@ mod tests {
         let store = open_or_init_store(&path, 8).unwrap();
         drop(store);
         let store = open_or_init_store(&path, 8).unwrap();
-        assert_eq!(schema_version(&store), 2);
+        assert_eq!(schema_version(&store), 3);
+    }
+
+    #[test]
+    fn pre_fts_schema_is_rejected_without_modification() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        let store = open_or_init_store(&path, 8).unwrap();
+        {
+            let conn = store.conn().unwrap();
+            conn.execute_batch(
+                "DROP TABLE symbol_fts;
+                 UPDATE meta SET value='2' WHERE key='schema_version';
+                 INSERT INTO meta (key, value) VALUES ('legacy_marker', 'preserve me');",
+            )
+            .unwrap();
+        }
+        drop(store);
+
+        for result in [
+            open_store(&path, 8),
+            open_store_for_write(&path, 8),
+            open_or_init_store(&path, 8),
+        ] {
+            let error = result.unwrap_err();
+            assert!(matches!(
+                error,
+                EngineError::SchemaMismatch {
+                    found: 2,
+                    expected: 3
+                }
+            ));
+            let message = error.to_string();
+            assert!(message.contains(".cig"));
+            assert!(message.contains("cadangan"));
+            assert!(message.contains("cigar init"));
+            assert!(message.contains("cigar sync"));
+        }
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(read_schema_version(&conn).unwrap(), 2);
+        assert_eq!(
+            read_meta(&conn, "legacy_marker").unwrap().as_deref(),
+            Some("preserve me")
+        );
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='symbol_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 0);
     }
 
     #[test]

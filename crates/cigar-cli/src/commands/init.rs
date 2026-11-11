@@ -34,14 +34,17 @@ pub fn run(context: &Context, args: &InitArgs, printer: &Printer) -> Result<i32>
     if let Some(dir) = &args.model_dir {
         config.embedding.model_dir = dir.clone();
     }
-    config.embedding.provider = args.embedding.parse()?;
+    if let Some(provider) = &args.embedding {
+        config.embedding.provider = provider.parse()?;
+    }
     config.storage.path = context.store_path();
     config.validate()?;
 
     write_config_atomic(&context.config_path, &config)?;
 
     let fingerprint = config.fingerprint()?;
-    let store = open_or_init_store(&context.store_path(), config.embedding.dimensions)?;
+    let store = open_or_init_store(&context.store_path(), config.embedding.dimensions)?
+        .with_search_config(&config.search);
 
     record_model_meta(
         &store,
@@ -50,10 +53,7 @@ pub fn run(context: &Context, args: &InitArgs, printer: &Printer) -> Result<i32>
             ("content_version", cigar_core::CONTENT_VERSION.to_string()),
             ("engine_version", ENGINE_VERSION.to_owned()),
             ("embedding_model", config.embedding.model.clone()),
-            (
-                "embedding_revision",
-                resolved_revision(&config, &args.embedding),
-            ),
+            ("embedding_revision", resolved_revision(&config)),
             (
                 "embedding_dimensions",
                 config.embedding.dimensions.to_string(),
@@ -67,9 +67,9 @@ pub fn run(context: &Context, args: &InitArgs, printer: &Printer) -> Result<i32>
         ],
     )?;
 
-    let branch = resolve_init_branch(context)?;
+    let branch = context.resolve_branch()?;
     let branch_name = branch.clone();
-    write_head_ref(&context.cig_dir, &branch_name, None)?;
+    write_head_ref(&context.cig_dir)?;
     write_branch_marker(&context.cig_dir, &branch_name, None)?;
     initialise_branch_state(
         &store,
@@ -84,10 +84,6 @@ pub fn run(context: &Context, args: &InitArgs, printer: &Printer) -> Result<i32>
     let _lock = StoreLock::acquire(&context.lock_path())?;
     drop(_lock);
 
-    if args.no_model || context.offline {
-        printer.warn("model belum disiapkan; jalankan `cigar model download` sebelum sync");
-    }
-
     if printer.json() {
         let payload = serde_json::json!({
             "schema_version": SCHEMA_VERSION,
@@ -96,6 +92,7 @@ pub fn run(context: &Context, args: &InitArgs, printer: &Printer) -> Result<i32>
             "already_initialized": existed,
             "git_mode": git_mode.to_string(),
             "branch": branch_name.to_string(),
+            "search": { "mode": config.search.mode },
             "namespace": config.engine.namespace.to_string(),
             "embedding": {
                 "provider": config.embedding.provider.to_string(),
@@ -123,27 +120,18 @@ pub fn run(context: &Context, args: &InitArgs, printer: &Printer) -> Result<i32>
     printer.field("namespace:", config.engine.namespace.as_str());
     printer.field("git:", git_mode.as_str());
     printer.field("branch:", branch_name.as_str());
-    printer.field(
-        "embedding:",
-        &format!(
-            "{} - {}d - template v{}",
-            config.embedding.model, config.embedding.dimensions, config.embedding.template_version
-        ),
-    );
+    printer.field("search:", &config.search.mode);
     printer.field("store:", &context.store_path().display().to_string());
-    if !args.no_model && !context.offline {
-        printer.info("catatan: unduhan model dilakukan oleh `cigar model download`");
-    }
     printer.blank();
     printer.line("Langkah berikutnya: `cigar sync`");
     Ok(0)
 }
 
-fn resolved_revision(config: &Config, provider: &str) -> String {
+fn resolved_revision(config: &Config) -> String {
     if !config.embedding.revision.is_empty() {
         return config.embedding.revision.clone();
     }
-    if provider == "fake" {
+    if config.embedding.provider == cigar_core::domain::EmbeddingProvider::Fake {
         return "fake-v1".into();
     }
     "unresolved".into()
@@ -189,27 +177,12 @@ fn write_config_atomic(path: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn resolve_init_branch(context: &Context) -> Result<cigar_core::domain::BranchName> {
-    match context.head_ref()? {
-        Some(crate::context::HeadRef::Branch(branch)) => Ok(branch),
-        Some(crate::context::HeadRef::Detached(oid)) => {
-            let _ = oid;
-            Ok(cigar_core::domain::BranchName::detached())
-        }
-        None => Ok(context.resolve_branch()?),
-    }
-}
-
-fn write_head_ref(
-    cig_dir: &Path,
-    branch: &cigar_core::domain::BranchName,
-    _commit: Option<&str>,
-) -> Result<()> {
+fn write_head_ref(cig_dir: &Path) -> Result<()> {
     let path = cig_dir.join("HEAD");
     if path.exists() {
         return Ok(());
     }
-    atomic_write(&path, format!("ref: refs/heads/{branch}\n").as_bytes())
+    atomic_write(&path, b"")
 }
 
 fn write_branch_marker(
@@ -320,4 +293,47 @@ fn find_git_dir(root: &Path) -> Result<Option<PathBuf>> {
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_init_creates_lexical_store_without_model_files() {
+        let root = tempfile::tempdir().unwrap();
+        let cig_dir = root.path().join(".cig");
+        let mut config = Config::default();
+        config.storage.path = cig_dir.join("store.db");
+        config.embedding.model_dir = root.path().join("missing-models");
+        let context = Context {
+            root: root.path().to_path_buf(),
+            config_path: cig_dir.join("config.toml"),
+            cig_dir: cig_dir.clone(),
+            namespace: config.engine.namespace.clone(),
+            config,
+            branch_override: None,
+            verbose: false,
+            offline: false,
+            strict: false,
+            wait_secs: 0,
+        };
+        let args = InitArgs {
+            git_mode: "auto".into(),
+            embedding: None,
+            model: None,
+            dimensions: None,
+            model_dir: None,
+            no_model: false,
+            force: false,
+        };
+
+        assert_eq!(run(&context, &args, &Printer::new(false, true)).unwrap(), 0);
+        assert!(cig_dir.join("store.db").is_file());
+        assert!(!root.path().join("missing-models").exists());
+        let text = fs::read_to_string(cig_dir.join("config.toml")).unwrap();
+        let parsed = Config::from_toml(&text, root.path(), &cig_dir).unwrap();
+        assert_eq!(parsed.search.mode, "lexical-graph");
+        assert_eq!(parsed.storage.driver, "sqlite");
+    }
 }

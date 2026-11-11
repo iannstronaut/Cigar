@@ -128,26 +128,7 @@ impl Context {
         self.cig_dir.join("lock")
     }
 
-    /// Reads `.cig/HEAD` and returns the branch it points at, if any.
-    pub fn head_ref(&self) -> Result<Option<HeadRef>> {
-        let path = self.cig_dir.join("HEAD");
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Ok(None);
-        };
-        let text = text.trim();
-        if let Some(rest) = text.strip_prefix("ref: refs/heads/") {
-            return Ok(Some(HeadRef::Branch(BranchName::parse(rest)?)));
-        }
-        if let Some(rest) = text.strip_prefix("commit: ") {
-            return Ok(Some(HeadRef::Detached(rest.trim().to_owned())));
-        }
-        Ok(None)
-    }
-
-    /// Branch used when `--branch` is absent.
-    ///
-    /// Git is authoritative: `.cig/HEAD` is a cache, and a branch switch
-    /// performed with `git checkout` must not require re-running `cigar init`.
+    /// Branch used when `--branch` is absent; Git is authoritative.
     pub fn resolve_branch(&self) -> Result<BranchName> {
         if let Some(branch) = &self.branch_override {
             return Ok(branch.clone());
@@ -155,11 +136,7 @@ impl Context {
         if let Some(branch) = self.git_head_branch()? {
             return Ok(branch);
         }
-        match self.head_ref()? {
-            Some(HeadRef::Branch(branch)) => Ok(branch),
-            Some(HeadRef::Detached(_)) => Ok(BranchName::detached()),
-            None => Ok(BranchName::parse("main")?),
-        }
+        BranchName::parse("main")
     }
 
     /// Reads the current branch from Git without opening a repository handle
@@ -197,13 +174,6 @@ impl Context {
     pub fn root_display(&self) -> String {
         self.root.display().to_string()
     }
-}
-
-/// What `.cig/HEAD` points to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HeadRef {
-    Branch(BranchName),
-    Detached(String),
 }
 
 fn absolute(path: &Path) -> PathBuf {

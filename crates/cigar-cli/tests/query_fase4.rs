@@ -110,7 +110,7 @@ fn query_returns_ranked_results_with_relations() {
     let (code, stdout, stderr) = run(&["query", "validate token", "--json"], repo.root());
     assert_eq!(code, 0, "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["schema_version"], 3);
     assert_eq!(value["index"]["branch"], "main");
     assert_eq!(value["index"]["stale"], false);
     let results = value["results"].as_array().unwrap();

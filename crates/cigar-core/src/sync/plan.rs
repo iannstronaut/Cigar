@@ -176,7 +176,7 @@ pub fn plan_file(
     imports: String,
     size_bytes: u64,
     parsed: &crate::traits::ParsedFile,
-    embedder: &dyn Embedder,
+    embedder: Option<&dyn Embedder>,
     template_version: u32,
     content_version: u32,
 ) -> PlannedFile {
@@ -208,7 +208,14 @@ pub fn plan_file(
             code_snippet: parsed_symbol.code.clone(),
             body_hash: crate::hash::body_hash(&parsed_symbol.body_stream),
         };
-        let (template, key) = embedder.template_for(path, &imports, &definition, template_version);
+        let (template, key) = embedder.map_or_else(
+            || {
+                let template = crate::hash::EmbeddingTemplate::render(path, &imports, &definition);
+                let key = template.key(template_version);
+                (template, key)
+            },
+            |embedder| embedder.template_for(path, &imports, &definition, template_version),
+        );
         symbols.push(PlannedSymbol {
             definition,
             start_line: parsed_symbol.start_line,
@@ -246,7 +253,7 @@ pub fn plan_source(
     language: Language,
     source: &str,
     size_bytes: u64,
-    embedder: &dyn Embedder,
+    embedder: Option<&dyn Embedder>,
     template_version: u32,
     content_version: u32,
 ) -> crate::Result<PlannedFile> {
@@ -390,7 +397,7 @@ mod tests {
             Language::Rust,
             source,
             128,
-            &embedder,
+            Some(&embedder),
             1,
             1,
         )
@@ -426,7 +433,7 @@ mod tests {
             Language::Rust,
             "fn a() {}\n",
             10,
-            &embedder,
+            Some(&embedder),
             1,
             1,
         )
@@ -443,7 +450,7 @@ mod tests {
             Language::Rust,
             "fn a() {}\n",
             10,
-            &embedder,
+            Some(&embedder),
             1,
             1,
         )

@@ -171,12 +171,11 @@ fn rewrite_refs(
     }
 
     let current = context.resolve_branch()?;
-    if branches.iter().any(|state| state.branch == current) {
-        let head_path = context.cig_dir.join("HEAD");
-        atomic_write(
-            &head_path,
-            format!("ref: refs/heads/{current}\n").as_bytes(),
-        )?;
-    }
+    let head = branches
+        .iter()
+        .find(|state| state.branch == current)
+        .and_then(|state| state.commit_hash.as_ref())
+        .map_or("", |commit| commit.as_str());
+    atomic_write(&context.cig_dir.join("HEAD"), head.as_bytes())?;
     Ok(())
 }

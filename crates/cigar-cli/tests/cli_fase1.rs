@@ -49,7 +49,7 @@ fn init_creates_state_and_is_idempotent() {
     assert!(cig.join("store.db").is_file());
     assert!(cig.join("HEAD").is_file());
     let head = std::fs::read_to_string(cig.join("HEAD")).unwrap();
-    assert_eq!(head.trim(), "ref: refs/heads/main");
+    assert!(head.is_empty());
 
     let (code, stdout, stderr) = run(
         &[
@@ -118,7 +118,7 @@ fn status_reports_empty_index_as_json() {
     let (code, stdout, stderr) = run(&["status", "--json"], root);
     assert_eq!(code, 0, "stderr: {stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("JSON valid");
-    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["schema_version"], 3);
     assert_eq!(value["stats"]["files"], 0);
     assert_eq!(value["stats"]["symbols"], 0);
     assert_eq!(value["branch"], "main");
@@ -167,7 +167,7 @@ fn version_reports_schema_and_sqlite_vec() {
     let (code, stdout, stderr) = run(&["version"], dir.path());
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("cigar "), "{stdout}");
-    assert!(stdout.contains("schema: 2"), "{stdout}");
+    assert!(stdout.contains("schema: 3"), "{stdout}");
     assert!(stdout.contains("sqlite-vec: v"), "{stdout}");
 }
 
@@ -177,7 +177,7 @@ fn version_json_is_machine_readable() {
     let (code, stdout, stderr) = run(&["version", "--json"], dir.path());
     assert_eq!(code, 0, "stderr: {stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("JSON valid");
-    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["schema_version"], 3);
     assert!(value["sqlite_vec"].as_str().unwrap().starts_with('v'));
 }
 

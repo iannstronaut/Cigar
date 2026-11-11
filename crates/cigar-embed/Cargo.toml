@@ -6,14 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+semantic = ["dep:ort", "dep:tokenizers", "dep:ureq"]
+
+[[test]]
+name = "onnx_real"
+required-features = ["semantic"]
+
 [dependencies]
 blake3.workspace = true
 cigar-core = { path = "../cigar-core" }
 serde.workspace = true
 thiserror.workspace = true
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std"] }
-tokenizers = { version = "=0.23.2", default-features = false, features = ["fancy-regex"] }
-ureq = { version = "2.12", default-features = false, features = ["tls"] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std"], optional = true }
+tokenizers = { version = "=0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
+ureq = { version = "2.12", default-features = false, features = ["tls"], optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

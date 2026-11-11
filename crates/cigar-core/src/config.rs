@@ -22,6 +22,7 @@ pub struct Config {
     pub git: GitConfig,
     pub embedding: EmbeddingConfig,
     pub storage: StorageConfig,
+    pub search: SearchConfig,
     pub query: QueryConfig,
     pub logging: LoggingConfig,
 }
@@ -38,6 +39,32 @@ pub struct GitConfig {
     pub include_untracked: bool,
     pub max_file_bytes: u64,
     pub exclude: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchConfig {
+    pub mode: String,
+    pub split_identifiers: bool,
+    pub weights: SearchWeights,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchWeights {
+    pub qualified_name: f64,
+    pub signature: f64,
+    pub docstring: f64,
+    pub code_tokens: f64,
+}
+
+impl Default for SearchWeights {
+    fn default() -> Self {
+        Self {
+            qualified_name: 10.0,
+            signature: 5.0,
+            docstring: 3.0,
+            code_tokens: 1.0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -98,6 +125,11 @@ impl Default for Config {
                     ".next/**".into(),
                 ],
             },
+            search: SearchConfig {
+                mode: "lexical-graph".into(),
+                split_identifiers: true,
+                weights: SearchWeights::default(),
+            },
             embedding: EmbeddingConfig {
                 provider: EmbeddingProvider::OnnxLocal,
                 model: "granite-embedding-125m-english".into(),
@@ -115,7 +147,7 @@ impl Default for Config {
                 document_prefix: String::new(),
             },
             storage: StorageConfig {
-                driver: "sqlite-vec".into(),
+                driver: "sqlite".into(),
                 path: PathBuf::from(".cig/store.db"),
                 busy_timeout_ms: 5_000,
                 wal_checkpoint_threshold_mb: 64,
@@ -176,6 +208,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub git: Option<GitFile>,
     #[serde(default)]
+    pub search: Option<SearchFile>,
+    #[serde(default)]
     pub embedding: Option<EmbeddingFile>,
     #[serde(default)]
     pub storage: Option<StorageFile>,
@@ -197,6 +231,21 @@ pub struct GitFile {
     pub include_untracked: Option<bool>,
     pub max_file_bytes: Option<u64>,
     pub exclude: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SearchFile {
+    pub mode: Option<String>,
+    pub split_identifiers: Option<bool>,
+    pub weights: Option<SearchWeightsFile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SearchWeightsFile {
+    pub qualified_name: Option<f64>,
+    pub signature: Option<f64>,
+    pub docstring: Option<f64>,
+    pub code_tokens: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -270,6 +319,28 @@ impl Config {
             }
             if let Some(exclude) = git.exclude {
                 config.git.exclude = exclude;
+            }
+        }
+        if let Some(search) = file.search {
+            if let Some(mode) = search.mode {
+                config.search.mode = mode;
+            }
+            if let Some(value) = search.split_identifiers {
+                config.search.split_identifiers = value;
+            }
+            if let Some(weights) = search.weights {
+                if let Some(value) = weights.qualified_name {
+                    config.search.weights.qualified_name = value;
+                }
+                if let Some(value) = weights.signature {
+                    config.search.weights.signature = value;
+                }
+                if let Some(value) = weights.docstring {
+                    config.search.weights.docstring = value;
+                }
+                if let Some(value) = weights.code_tokens {
+                    config.search.weights.code_tokens = value;
+                }
             }
         }
         if let Some(embedding) = file.embedding {
@@ -362,7 +433,25 @@ impl Config {
 
     /// Validates every constraint in docs/10 section16.3.
     pub fn validate(&self) -> Result<()> {
-        if self.storage.driver != "sqlite-vec" {
+        if self.search.mode != "lexical-graph" {
+            return Err(EngineError::config(format!(
+                "search.mode tidak didukung: {}",
+                self.search.mode
+            )));
+        }
+        for (name, value) in [
+            ("qualified_name", self.search.weights.qualified_name),
+            ("signature", self.search.weights.signature),
+            ("docstring", self.search.weights.docstring),
+            ("code_tokens", self.search.weights.code_tokens),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(EngineError::config(format!(
+                    "search.weights.{name} harus non-negatif dan finite"
+                )));
+            }
+        }
+        if self.storage.driver != "sqlite" && self.storage.driver != "sqlite-vec" {
             return Err(EngineError::config(format!(
                 "storage.driver tidak didukung: {}",
                 self.storage.driver
@@ -422,7 +511,7 @@ impl Config {
 
     /// Stable config fingerprint used to detect drift that requires reindex.
     pub fn fingerprint(&self) -> Result<crate::domain::ConfigFingerprint> {
-        crate::hash::config_fingerprint(
+        let base = crate::hash::config_fingerprint(
             &self.embedding.model,
             &self.embedding.revision,
             self.embedding.dimensions,
@@ -432,7 +521,15 @@ impl Config {
             } else {
                 "none"
             },
-        )
+        )?;
+        if self.search.split_identifiers {
+            return Ok(base);
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"lexical-config\0");
+        hasher.update(base.as_str().as_bytes());
+        hasher.update(b"\0split-identifiers=false");
+        crate::domain::ConfigFingerprint::parse(hasher.finalize().to_hex().to_string())
     }
 
     /// Validates a storage URI is a local path inside the repository or CIG
@@ -565,6 +662,22 @@ pub fn render_default_config(config: &Config) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let _ = writeln!(out, "exclude = [{exclude}]");
+    out.push_str("\n[search]\n");
+    let _ = writeln!(out, "mode = \"{}\"", config.search.mode);
+    let _ = writeln!(
+        out,
+        "split_identifiers = {}",
+        config.search.split_identifiers
+    );
+    out.push_str("\n[search.weights]\n");
+    let _ = writeln!(
+        out,
+        "qualified_name = {:?}",
+        config.search.weights.qualified_name
+    );
+    let _ = writeln!(out, "signature = {:?}", config.search.weights.signature);
+    let _ = writeln!(out, "docstring = {:?}", config.search.weights.docstring);
+    let _ = writeln!(out, "code_tokens = {:?}", config.search.weights.code_tokens);
     out.push_str("\n[embedding]\n");
     let _ = writeln!(out, "provider = \"{}\"", config.embedding.provider);
     let _ = writeln!(out, "model = \"{}\"", config.embedding.model);
@@ -618,6 +731,8 @@ mod tests {
     fn defaults_are_valid() {
         let config = Config::default();
         config.validate().unwrap();
+        assert_eq!(config.search.mode, "lexical-graph");
+        assert_eq!(config.storage.driver, "sqlite");
         assert_eq!(config.embedding.dimensions, 768);
     }
 
@@ -675,5 +790,39 @@ mod tests {
         let text = render_default_config(&config);
         let parsed = Config::from_toml(&text, &root(), &root().join(".cig")).unwrap();
         assert_eq!(parsed.embedding.model, config.embedding.model);
+        assert_eq!(parsed.search.mode, "lexical-graph");
+        assert_eq!(parsed.storage.driver, "sqlite");
+    }
+
+    #[test]
+    fn search_settings_round_trip_and_validate() {
+        let text = "[search]\nsplit_identifiers = false\n[search.weights]\nsignature = 8.5\n";
+        let config = Config::from_toml(text, &root(), &root().join(".cig")).unwrap();
+        assert!(!config.search.split_identifiers);
+        assert_eq!(config.search.weights.signature, 8.5);
+        assert_eq!(config.search.weights.qualified_name, 10.0);
+        let parsed = Config::from_toml(
+            &render_default_config(&config),
+            &root(),
+            &root().join(".cig"),
+        )
+        .unwrap();
+        assert_eq!(parsed.search, config.search);
+        for value in ["-1.0", "nan", "inf"] {
+            let text = format!("[search.weights]\ncode_tokens = {value}\n");
+            assert!(Config::from_toml(&text, &root(), &root().join(".cig")).is_err());
+        }
+        let mut defaults = Config::default();
+        let fingerprint = defaults.fingerprint().unwrap();
+        defaults.search.weights.signature = 42.0;
+        assert_eq!(defaults.fingerprint().unwrap(), fingerprint);
+        defaults.search.split_identifiers = false;
+        assert_ne!(defaults.fingerprint().unwrap(), fingerprint);
+    }
+
+    #[test]
+    fn unsupported_search_mode_is_rejected() {
+        let text = "[search]\nmode = \"hybrid\"\n";
+        assert!(Config::from_toml(text, &root(), &root().join(".cig")).is_err());
     }
 }

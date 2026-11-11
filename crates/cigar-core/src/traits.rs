@@ -107,6 +107,17 @@ pub trait ContextStore: Send + Sync {
         top_k: usize,
     ) -> Result<Vec<ScoredOccurrence>>;
 
+    /// Searches the deterministic FTS5 lexical index. Implementations combine
+    /// weighted BM25 with graph centrality and return the same occurrence
+    /// projection as vector search, so callers can use one expansion pipeline.
+    fn search_lexical(
+        &self,
+        namespace: &Namespace,
+        branch: &BranchName,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<ScoredOccurrence>>;
+
     fn get_neighbors(
         &self,
         namespace: &Namespace,

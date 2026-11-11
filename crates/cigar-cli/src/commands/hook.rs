@@ -122,19 +122,13 @@ fn hook_block(hook: &str, binary: &Path, context: &Context, log: Option<&Path>) 
     let bin = shell_quote(&binary.display().to_string());
     let cig = shell_quote(&context.cig_dir.display().to_string());
     let redirect = log.map_or_else(
-        || "2>/dev/null || true".to_owned(),
-        |path| {
-            format!(
-                ">>{} 2>&1 || true",
-                shell_quote(&path.display().to_string())
-            )
-        },
+        || ">/dev/null 2>&1".to_owned(),
+        |path| format!(">>{} 2>&1", shell_quote(&path.display().to_string())),
     );
     let mode = if hook == "post-checkout" {
-        // post-checkout fires on file checkouts too; only branch switches matter.
-        "if [ \"$3\" = \"1\" ]; then\n    \"$CIGAR_BIN\" sync --cwd \"$CIGAR_ROOT\" --cig-dir \"$CIGAR_DIR\" \"$CIGAR_WAIT\" >/dev/null MODE || true\nfi"
+        "if [ \"$3\" = \"1\" ]; then\n    \"$CIGAR_BIN\" sync --quiet --cwd \"$CIGAR_ROOT\" --cig-dir \"$CIGAR_DIR\" WAIT MODE &\nfi"
     } else {
-        "\"$CIGAR_BIN\" sync --cwd \"$CIGAR_ROOT\" --cig-dir \"$CIGAR_DIR\" \"$CIGAR_WAIT\" >/dev/null MODE || true"
+        "\"$CIGAR_BIN\" sync --quiet --cwd \"$CIGAR_ROOT\" --cig-dir \"$CIGAR_DIR\" WAIT MODE &"
     };
     let wait = if context.wait_secs > 0 {
         format!("--wait {}", context.wait_secs)
@@ -143,7 +137,7 @@ fn hook_block(hook: &str, binary: &Path, context: &Context, log: Option<&Path>) 
     };
     let mode = mode.replace("MODE", &redirect).replace("WAIT", &wait);
     format!(
-        "{BEGIN_MARKER}\n# Managed by CIGAR; edits inside this block are overwritten.\nif command -v \"{bin}\" >/dev/null 2>&1; then\n    CIGAR_BIN={bin}\n    CIGAR_ROOT={root}\n    CIGAR_DIR={cig}\n    CIGAR_WAIT=\"{wait}\"\n    {mode}\nfi\n{END_MARKER}\n"
+        "{BEGIN_MARKER}\n# Managed by CIGAR; edits inside this block are overwritten.\nif command -v \"{bin}\" >/dev/null 2>&1; then\n    CIGAR_BIN={bin}\n    CIGAR_ROOT={root}\n    CIGAR_DIR={cig}\n    {mode}\nfi\n{END_MARKER}\n"
     )
 }
 

@@ -16,19 +16,11 @@ use cigar_storage::backup_store;
 use crate::cli::ReindexArgs;
 use crate::commands::sync::open_source;
 use crate::context::Context;
-use crate::embedding::{build_embedder, resolve_manifest, validate_dimensions};
 use crate::output::Printer;
 
 /// Runs `cigar reindex`.
 pub fn run(context: &Context, args: &ReindexArgs, printer: &Printer) -> Result<i32> {
     context.require_initialized()?;
-
-    // Validate the model before destroying anything. The manifest only applies
-    // to the ONNX provider; the fake backend has no model to validate.
-    if context.config.embedding.provider == cigar_core::domain::EmbeddingProvider::OnnxLocal {
-        let manifest = resolve_manifest(&context.config)?;
-        validate_dimensions(&context.config, &manifest)?;
-    }
 
     if !args.yes
         && !printer.json()
@@ -46,7 +38,8 @@ pub fn run(context: &Context, args: &ReindexArgs, printer: &Printer) -> Result<i
     let store = cigar_storage::open_store_for_write(
         &context.store_path(),
         context.config.embedding.dimensions,
-    )?;
+    )?
+    .with_search_config(&context.config.search);
     let branches = store.list_branches(&context.namespace)?;
 
     if !args.no_backup {
@@ -74,7 +67,7 @@ pub fn run(context: &Context, args: &ReindexArgs, printer: &Printer) -> Result<i
     // Re-embed every symbol: `--full` plus a vector purge would be needed, and
     // the schema guarantees vectors are keyed by content, so a stale vector is
     // still valid. Reindex keeps valid vectors and only recomputes changed ones.
-    let embedder = build_embedder(&context.config, context.offline)?;
+    let embedder = None;
     let registry = ParserRegistry::with_defaults();
     let clock = SystemClock;
     let source = open_source(context)?;
@@ -89,13 +82,7 @@ pub fn run(context: &Context, args: &ReindexArgs, printer: &Printer) -> Result<i
         strict: context.strict,
     };
     let branch = context.resolve_branch()?;
-    let engine = SyncEngine::new(
-        &store,
-        embedder.as_ref(),
-        &registry,
-        &context.config,
-        &clock,
-    );
+    let engine = SyncEngine::new(&store, embedder, &registry, &context.config, &clock);
     let outcome = engine.run(source.as_ref(), &context.namespace, &branch, &options)?;
 
     if printer.json() {
